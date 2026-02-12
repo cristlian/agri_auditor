@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
+
+try:
+    from agri_auditor.ingestion import LogLoader
+except ModuleNotFoundError as exc:
+    if exc.name == "agri_auditor":
+        raise SystemExit(
+            "Unable to import 'agri_auditor'. Install the project first "
+            "(for example: `python -m pip install -e .` or `poetry install`) "
+            "and rerun this script."
+        ) from exc
+    raise
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from agri_auditor.ingestion import LogLoader  # noqa: E402
 
 
 def main() -> None:

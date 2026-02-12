@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.pytest_cache/
+pytest-cache-files-*/
+tmp*/
+
+artifacts/
+write_probe.txt
