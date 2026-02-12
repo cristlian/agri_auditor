@@ -46,6 +46,17 @@ def test_build_features_adds_expected_columns(features_df: pd.DataFrame) -> None
     assert required_cols.issubset(features_df.columns)
 
 
+def test_build_features_adds_phase25_columns(features_df: pd.DataFrame) -> None:
+    """Phase 2.5 columns: orientation, sensor health, canopy, GPS."""
+    phase25_cols = {
+        "yaw", "pitch", "roll", "yaw_rate",
+        "imu_correlation", "pose_confidence",
+        "canopy_density_proxy",
+        "gps_lat", "gps_lon",
+    }
+    assert phase25_cols.issubset(features_df.columns)
+
+
 def test_roughness_high_pass_is_non_negative_and_informative(
     features_df: pd.DataFrame,
 ) -> None:
@@ -134,6 +145,61 @@ def test_step2_script_exports_csv() -> None:
         "min_clearance_m",
     ):
         assert col in exported.columns
+
+
+# ------------------------------------------------------------------
+# Phase 2.5 feature tests
+# ------------------------------------------------------------------
+
+
+def test_orientation_yaw_pitch_roll_finite(features_df: pd.DataFrame) -> None:
+    """Quaternion → Euler: yaw/pitch/roll should be finite where quats exist."""
+    for col in ("yaw", "pitch", "roll"):
+        finite = features_df[col].dropna()
+        assert len(finite) > 1000, f"{col} has too few finite values: {len(finite)}"
+        assert (finite.abs() <= 180).all(), f"{col} has values outside ±180°"
+
+
+def test_yaw_rate_reasonable_range(features_df: pd.DataFrame) -> None:
+    """Yaw rate should be finite and within a physically reasonable range (deg/s)."""
+    yaw_rate = features_df["yaw_rate"].dropna()
+    assert len(yaw_rate) > 1000
+    # Tractor shouldn't spin faster than ~50 deg/s in normal operation
+    assert (yaw_rate.abs() < 500).all(), "Yaw rate exceeds 500 deg/s — likely unwrap bug"
+
+
+def test_imu_correlation_range(features_df: pd.DataFrame) -> None:
+    """Rolling IMU cross-correlation must be in [-1, 1]."""
+    corr = features_df["imu_correlation"].dropna()
+    assert len(corr) > 1000, f"Only {len(corr)} non-null imu_correlation values"
+    assert (corr >= -1.01).all() and (corr <= 1.01).all(), "Correlation outside [-1, 1]"
+
+
+def test_pose_confidence_passthrough(features_df: pd.DataFrame) -> None:
+    """Pose confidence is passed through from the raw manifest column."""
+    conf = features_df["pose_confidence"].dropna()
+    assert len(conf) > 1000
+    assert (conf > 0).all(), "Pose confidence should be positive"
+
+
+def test_canopy_density_proxy(features_df: pd.DataFrame) -> None:
+    """Canopy density proxy is non-NaN where depth exists, NaN where not."""
+    has_depth = features_df["has_depth"].astype(bool)
+    # Where depth absent → NaN
+    assert features_df.loc[~has_depth, "canopy_density_proxy"].isna().all()
+    # Where depth present → at least some finite values (some frames may have
+    # zero-valued upper crops, which would also be NaN)
+    canopy = features_df.loc[has_depth, "canopy_density_proxy"].dropna()
+    assert len(canopy) > 0
+    assert (canopy > 0).all(), "Canopy density proxy should be > 0 where valid"
+
+
+def test_gps_lat_lon_numeric(features_df: pd.DataFrame) -> None:
+    """GPS lat / lon are numeric after cleaning."""
+    for col in ("gps_lat", "gps_lon"):
+        vals = features_df[col].dropna()
+        assert len(vals) > 1000, f"{col} has too few non-null values"
+        assert vals.dtype == np.float64 or np.issubdtype(vals.dtype, np.floating)
 
 
 def _count_valid_depth_frames(loader: LogLoader, df: pd.DataFrame) -> int:

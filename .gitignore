@@ -10,3 +10,4 @@ tmp*/
 
 artifacts/
 write_probe.txt
+.env
