@@ -1,0 +1,26 @@
+[project]
+name = "agri-auditor"
+version = "0.1.0"
+description = "Step 1 ingestion scaffold for autonomous incident auditing."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pandas>=2.2.3",
+    "numpy>=2.2.2",
+    "pillow>=11.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

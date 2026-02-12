@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+src/agri_auditor/__init__.py
+src/agri_auditor/ingestion.py
+src/agri_auditor.egg-info/PKG-INFO
+src/agri_auditor.egg-info/SOURCES.txt
+src/agri_auditor.egg-info/dependency_links.txt
+src/agri_auditor.egg-info/requires.txt
+src/agri_auditor.egg-info/top_level.txt
+tests/test_ingestion.py
