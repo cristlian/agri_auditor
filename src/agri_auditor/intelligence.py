@@ -253,6 +253,7 @@ class EventDetector:
 
         severity_score = (
             self.roughness_weight * roughness_norm
+            + self.proximity_weight * proximity_norm
             + self.yaw_rate_weight * yaw_rate_norm
             + self.imu_fault_weight * imu_fault_norm
             + self.localization_fault_weight * localization_fault_norm
@@ -870,5 +871,4 @@ def _truncate_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return " ".join(words)
     return " ".join(words[:max_words])
-
 

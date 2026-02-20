@@ -12,6 +12,7 @@ from .intelligence import (
     GeminiConfigError,
     IntelligenceOrchestrator,
 )
+from .reporting import ReportBuilder
 
 __all__ = [
     "ALL_CAMERAS",
@@ -25,4 +26,5 @@ __all__ = [
     "GeminiConfigError",
     "IntelligenceOrchestrator",
     "LogLoader",
+    "ReportBuilder",
 ]

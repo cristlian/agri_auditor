@@ -96,6 +96,30 @@ def test_score_dataframe_imputes_safe_values_before_normalization() -> None:
     assert np.isfinite(severity).all()
 
 
+def test_score_dataframe_includes_proximity_signal_in_severity() -> None:
+    detector = EventDetector()
+    df = pd.DataFrame(
+        {
+            "frame_idx": [0, 1],
+            "timestamp_sec": [0.0, 1.0],
+            "roughness": [0.0, 0.0],
+            "yaw_rate": [0.0, 0.0],
+            "imu_correlation": [1.0, 1.0],
+            "pose_confidence": [100.0, 100.0],
+            "min_clearance_m": [9.0, 2.0],
+        }
+    )
+
+    scored = detector.score_dataframe(df)
+    severity = pd.to_numeric(scored["severity_score"], errors="coerce")
+    proximity = pd.to_numeric(scored["proximity_norm"], errors="coerce")
+
+    assert np.isfinite(proximity).all()
+    assert np.isfinite(severity).all()
+    assert float(proximity.iloc[1]) > float(proximity.iloc[0])
+    assert float(severity.iloc[1]) > float(severity.iloc[0])
+
+
 def test_stationary_imu_nan_maps_to_safe_fault() -> None:
     detector = EventDetector()
     df = pd.DataFrame(
