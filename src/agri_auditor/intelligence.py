@@ -38,6 +38,17 @@ DEFAULT_THINKING_LEVEL = "low"  # Minimizes latency for simple caption tasks
 DEFAULT_MAX_WORDS = 20
 UNAVAILABLE_CAPTION = "AI Analysis Unavailable"
 
+RECOVERABLE_ANALYSIS_ERRORS = (
+    RuntimeError,
+    ValueError,
+    TypeError,
+    TimeoutError,
+    OSError,
+    urllib.error.HTTPError,
+    urllib.error.URLError,
+    json.JSONDecodeError,
+)
+
 # All 6 surround-view cameras in standard order
 ALL_CAMERAS = (
     "front_left",
@@ -442,7 +453,7 @@ class GeminiAnalyst:
                 model=selected_model,
             )
             return self._normalize_result(result)
-        except Exception as sdk_error:  # pragma: no cover - exercised via mock fallback test
+        except RECOVERABLE_ANALYSIS_ERRORS as sdk_error:
             sdk_message = str(sdk_error)
 
         try:
@@ -452,7 +463,7 @@ class GeminiAnalyst:
                 model=selected_model,
             )
             return self._normalize_result(result)
-        except Exception as rest_error:
+        except RECOVERABLE_ANALYSIS_ERRORS as rest_error:
             return GeminiAnalysisResult(
                 caption=UNAVAILABLE_CAPTION,
                 model=selected_model,
@@ -486,7 +497,7 @@ class GeminiAnalyst:
         start = time.perf_counter()
         try:
             from google import genai  # type: ignore
-        except Exception as exc:
+        except ImportError as exc:
             raise RuntimeError("google-genai SDK is unavailable.") from exc
 
         client = genai.Client(api_key=self.api_key)
@@ -508,11 +519,14 @@ class GeminiAnalyst:
         config: dict[str, Any] = {"temperature": self.temperature}
         if self._model_supports_thinking_level(model):
             config["thinking_config"] = {"thinking_level": self.thinking_level}
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except (RuntimeError, ValueError, TypeError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"SDK request failed: {exc}") from exc
         latency_ms = (time.perf_counter() - start) * 1000.0
 
         caption = self._extract_sdk_caption(response)
@@ -800,7 +814,7 @@ class IntelligenceOrchestrator:
             )
         try:
             return self.analyst.analyze_image(image_path=image_path, model=model)
-        except Exception as exc:
+        except RECOVERABLE_ANALYSIS_ERRORS as exc:
             return GeminiAnalysisResult(
                 caption=UNAVAILABLE_CAPTION,
                 model=model,
@@ -871,4 +885,3 @@ def _truncate_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return " ".join(words)
     return " ".join(words[:max_words])
-

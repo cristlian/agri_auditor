@@ -13,7 +13,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "plotly>=5.18.0",
     "jinja2>=3.1.0",
+    "structlog>=24.4.0",
 ]
+
+[project.scripts]
+agri-auditor = "agri_auditor.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3.4"]
@@ -21,7 +25,10 @@ dev = ["pytest>=8.3.4"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider -m \"not gemini_live\""
+markers = [
+    "gemini_live: tests that require a live GEMINI_API_KEY and network access",
+]
 
 [build-system]
 requires = ["setuptools>=75.0"]

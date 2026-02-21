@@ -2,6 +2,7 @@
 
 from .features import FeatureEngine
 from .ingestion import CameraModel, LogLoader
+from .config import RuntimeConfig, load_runtime_config
 from .intelligence import (
     ALL_CAMERAS,
     Event,
@@ -27,4 +28,6 @@ __all__ = [
     "IntelligenceOrchestrator",
     "LogLoader",
     "ReportBuilder",
+    "RuntimeConfig",
+    "load_runtime_config",
 ]

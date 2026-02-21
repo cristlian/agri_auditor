@@ -10,8 +10,8 @@ The pipeline ingests raw log data, computes safety and kinematic features, detec
 - Phase 2 Physics/Features: Completed (`FeatureEngine` in `src/agri_auditor/features.py`)
 - Phase 3 Intelligence Layer: Completed (`EventDetector`, `GeminiAnalyst`, orchestrator in `src/agri_auditor/intelligence.py`)
 - Phase 4 Dashboard: Completed (`ReportBuilder` in `src/agri_auditor/reporting.py`)
-- Phase 5 Productionization: Partial (env-based config present; Dockerfile not yet added)
-- Phase 6 Documentation/Polish: In progress (this README and tests)
+- Phase 5 Productionization: Completed (`Dockerfile`, unified CLI, CI gates, deterministic unit lane + live Gemini lane)
+- Phase 6 Documentation/Polish: Deferred
 
 ## Requirements
 
@@ -31,6 +31,12 @@ python -m pytest -q
 ```
 
 ## End-to-End Usage
+
+Unified CLI:
+
+```powershell
+python -m agri_auditor process --data-dir ../provided_data --output-features artifacts/features.csv --output-events artifacts/events.json --output-report artifacts/audit_report.html --disable-gemini
+```
 
 1. Build features:
 
@@ -56,6 +62,20 @@ python scripts/build_report.py --data-dir ../provided_data --output artifacts/au
 $env:GEMINI_API_KEY="your-key"
 python scripts/build_events.py --data-dir ../provided_data --output artifacts/events.json
 python scripts/build_report.py --data-dir ../provided_data --events-json artifacts/events.json --output artifacts/audit_report.html
+```
+
+## Test Lanes
+
+Deterministic unit lane:
+
+```powershell
+python -m pytest -q
+```
+
+Live Gemini lane (requires `GEMINI_API_KEY`):
+
+```powershell
+python -m pytest -q -m gemini_live -o addopts="-p no:cacheprovider"
 ```
 
 ## Main Components

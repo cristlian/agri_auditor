@@ -290,6 +290,24 @@ def test_gemini_analyst_returns_unavailable_on_api_error(
     assert "rest_error=REST outage" in result.error
 
 
+def test_orchestrator_handles_recoverable_analyst_runtime_error(
+    loader: LogLoader,
+) -> None:
+    class _BrokenAnalyst:
+        def analyze_image(self, image_path: Path, model: str | None = None) -> GeminiAnalysisResult:
+            raise RuntimeError("simulated runtime failure")
+
+    orchestrator = IntelligenceOrchestrator(loader=loader, analyst=_BrokenAnalyst())
+    analysis = orchestrator._analyze_event_frame(
+        image_path=Path("nonexistent.jpg"),
+        model="gemini-3-flash-preview",
+    )
+    assert analysis.source == "unavailable"
+    assert analysis.caption == "AI Analysis Unavailable"
+    assert analysis.error is not None
+    assert "simulated runtime failure" in analysis.error
+
+
 def test_build_events_script_writes_json() -> None:
     script_path = PROJECT_ROOT / "scripts" / "build_events.py"
     output_path = data_dir() / f"events_test_export_{uuid.uuid4().hex}.json"
@@ -336,73 +354,6 @@ def test_build_events_script_writes_json() -> None:
     assert isinstance(payload["events"], list)
     assert len(payload["events"]) == 5
     assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
-
-
-# ---------------------------------------------------------------------------
-# Live Gemini integration tests (skipped when GEMINI_API_KEY is not set)
-# ---------------------------------------------------------------------------
-
-_has_api_key = bool(os.environ.get("GEMINI_API_KEY", "").strip())
-_skip_no_key = pytest.mark.skipif(
-    not _has_api_key,
-    reason="GEMINI_API_KEY not set; skipping live Gemini integration test.",
-)
-
-
-@_skip_no_key
-def test_gemini_live_sdk_returns_valid_caption() -> None:
-    """Smoke test: real API call via SDK returns a meaningful caption."""
-    image_path = sample_image_path()
-    analyst = GeminiAnalyst(model="gemini-3-flash-preview")
-    result = analyst.analyze_image(image_path=image_path)
-
-    assert result.source == "sdk", f"Expected SDK source, got {result.source} (error: {result.error})"
-    assert result.caption != "AI Analysis Unavailable"
-    assert len(result.caption.split()) <= 25, f"Caption too long: {result.caption}"
-    assert result.latency_ms is not None and result.latency_ms > 0
-    assert result.input_tokens is not None and result.input_tokens > 0
-    assert result.total_tokens is not None and result.total_tokens > 0
-    assert result.model == "gemini-3-flash-preview"
-
-
-@_skip_no_key
-def test_gemini_live_thinking_tokens_captured() -> None:
-    """Gemini 3 Flash with thinking_level='low' should use minimal thinking tokens."""
-    image_path = sample_image_path()
-    analyst = GeminiAnalyst(model="gemini-3-flash-preview")
-    result = analyst.analyze_image(image_path=image_path)
-
-    assert result.source == "sdk"
-    # Gemini 3 Flash with thinking_level='low' should use fewer thinking tokens
-    # than 2.5 Flash which had no control over thinking budget
-    if result.thinking_tokens is not None:
-        assert result.thinking_tokens >= 0
-    if (
-        result.input_tokens is not None
-        and result.output_tokens is not None
-        and result.total_tokens is not None
-    ):
-        assert result.total_tokens >= result.input_tokens + result.output_tokens
-
-
-@_skip_no_key
-def test_gemini_live_build_events_end_to_end(loader: LogLoader) -> None:
-    """Full end-to-end: features -> event detection -> Gemini captions -> Event list."""
-    features_df = FeatureEngine(loader=loader).build_features()
-    analyst = GeminiAnalyst(model="gemini-3-flash-preview")
-    orchestrator = IntelligenceOrchestrator(
-        loader=loader, analyst=analyst, primary_camera="front_center_stereo_left"
-    )
-    events = orchestrator.build_events(
-        features_df=features_df, top_k=2, distance_frames=150
-    )
-
-    assert len(events) == 2
-    for event in events:
-        assert event.gemini_source == "sdk", f"Event {event.event_rank} source={event.gemini_source}"
-        assert event.gemini_caption != "AI Analysis Unavailable"
-        assert event.gemini_model == "gemini-3-flash-preview"
-        assert event.gemini_latency_ms is not None and event.gemini_latency_ms > 0
 
 
 def sample_image_path() -> Path:
