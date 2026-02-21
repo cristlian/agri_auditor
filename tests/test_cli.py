@@ -115,3 +115,23 @@ def test_legacy_script_wrappers_forward_to_cli_help() -> None:
         assert result.returncode == 0, (
             f"{script_path.name} --help failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
+
+
+def test_prepare_test_data_script_creates_required_files() -> None:
+    script_path = PROJECT_ROOT / "scripts" / "prepare_test_data.py"
+    tmp_dir = PROJECT_ROOT / "artifacts" / f"provided_data_test_{uuid.uuid4().hex}"
+    result = subprocess.run(
+        [sys.executable, str(script_path), "--output-dir", str(tmp_dir)],
+        cwd=PROJECT_ROOT,
+        env=_pythonpath_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"prepare_test_data.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert (tmp_dir / "manifest.csv").exists()
+    assert (tmp_dir / "calibrations.json").exists()
+    assert (tmp_dir / "frames" / "front_center_stereo_left" / "0000.jpg").exists()
+    assert (tmp_dir / "frames" / "depth" / "0000.png").exists()
