@@ -343,6 +343,93 @@ class TestReportBuilder:
         content = out.read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in content
 
+    def test_render_includes_csp_and_safe_data_loader(self, builder):
+        html = builder._render()
+        assert "Content-Security-Policy" in html
+        assert "DATA_INLINE" in html
+        assert "events_json_str" not in html
+        assert "telemetry_json | safe" not in html
+        assert "function nearestIndex" in html
+        assert "FEATURES.reduce" not in html
+
+    def test_render_escapes_untrusted_caption(self):
+        events = _make_events(1)
+        ev = events[0]
+        events[0] = Event(
+            event_rank=ev.event_rank,
+            frame_idx=ev.frame_idx,
+            timestamp_sec=ev.timestamp_sec,
+            timestamp_iso_utc=ev.timestamp_iso_utc,
+            severity_score=ev.severity_score,
+            roughness=ev.roughness,
+            min_clearance_m=ev.min_clearance_m,
+            yaw_rate=ev.yaw_rate,
+            imu_correlation=ev.imu_correlation,
+            pose_confidence=ev.pose_confidence,
+            roughness_norm=ev.roughness_norm,
+            proximity_norm=ev.proximity_norm,
+            yaw_rate_norm=ev.yaw_rate_norm,
+            imu_fault_norm=ev.imu_fault_norm,
+            localization_fault_norm=ev.localization_fault_norm,
+            event_type=ev.event_type,
+            gps_lat=ev.gps_lat,
+            gps_lon=ev.gps_lon,
+            primary_camera=ev.primary_camera,
+            camera_paths=ev.camera_paths,
+            gemini_caption='<script>alert(\"xss\")</script>',
+            gemini_model=ev.gemini_model,
+            gemini_source="sdk",
+            gemini_latency_ms=ev.gemini_latency_ms,
+        )
+        builder = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=events,
+            metadata={"run_id": "xss-test"},
+            include_surround=False,
+        )
+        html = builder._render()
+        assert '<script>alert("xss")</script>' not in html
+        assert "&lt;script&gt;" in html
+
+    def test_split_mode_writes_asset_files(self):
+        builder = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=_make_events(),
+            metadata={"run_id": "split-mode-test"},
+            include_surround=False,
+            report_mode="split",
+        )
+        tmpdir = _new_workspace_tmp_dir()
+        out = builder.save_report(tmpdir / "split_report.html")
+        assets_dir = tmpdir / "split_report_assets"
+        assert out.exists()
+        assert assets_dir.exists()
+        for filename in ("events.json", "gps_path.json", "features.json", "telemetry.json"):
+            assert (assets_dir / filename).exists()
+
+    def test_telemetry_downsample_reduces_feature_payload_rows(self):
+        full = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(120),
+            events=_make_events(),
+            metadata={"run_id": "full"},
+            include_surround=False,
+            telemetry_downsample=1,
+        )
+        downsampled = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(120),
+            events=_make_events(),
+            metadata={"run_id": "downsampled"},
+            include_surround=False,
+            telemetry_downsample=4,
+        )
+        full_rows = len(full._build_payload()["features"])
+        down_rows = len(downsampled._build_payload()["features"])
+        assert down_rows < full_rows
+
 
 class TestReportBuilderWithRealData:
     """Integration tests using the actual provided_data directory."""

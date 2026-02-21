@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import statistics
+import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -12,9 +14,17 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from . import EventDetector, FeatureEngine, IntelligenceOrchestrator, LogLoader, ReportBuilder
 from .config import RuntimeConfig, load_runtime_config, normalize_log_format, normalize_log_level
-from .intelligence import Event, GeminiAnalyst, GeminiConfigError, UNAVAILABLE_CAPTION
+from .features import FeatureEngine
+from .ingestion import LogLoader
+from .intelligence import (
+    Event,
+    EventDetector,
+    GeminiAnalyst,
+    GeminiConfigError,
+    IntelligenceOrchestrator,
+    UNAVAILABLE_CAPTION,
+)
 from .logging_config import configure_logging, get_logger, log_event
 
 
@@ -30,6 +40,165 @@ DEFAULT_TOP_K = 5
 DEFAULT_DISTANCE_FRAMES = 150
 DEFAULT_CAMERA = "front_center_stereo_left"
 DEFAULT_RUN_ID = "audit-run"
+
+
+def _get_report_builder() -> type[Any]:
+    try:
+        from .reporting import ReportBuilder
+    except ImportError as exc:
+        raise RuntimeError(
+            "Report dependencies are missing. Install with: pip install agri-auditor[report]"
+        ) from exc
+    return ReportBuilder
+
+
+def _resolve_optional_arg(args: argparse.Namespace, name: str, fallback: Any) -> Any:
+    value = getattr(args, name, None)
+    return fallback if value is None else value
+
+
+def _parse_csv_columns(raw: str) -> tuple[str, ...]:
+    parts = [item.strip() for item in str(raw).split(",")]
+    return tuple(item for item in parts if item)
+
+
+def _make_feature_engine(
+    *,
+    loader: LogLoader,
+    runtime: RuntimeConfig,
+    args: argparse.Namespace,
+) -> FeatureEngine:
+    depth_workers = int(
+        _resolve_optional_arg(args, "depth_workers", runtime.depth_workers)
+    )
+    depth_cache_dir = _resolve_optional_arg(args, "depth_cache_dir", runtime.depth_cache_dir)
+    return FeatureEngine(
+        loader=loader,
+        depth_workers=depth_workers,
+        depth_cache_dir=depth_cache_dir,
+    )
+
+
+def _make_event_detector(runtime: RuntimeConfig, args: argparse.Namespace) -> EventDetector:
+    normalization = str(
+        _resolve_optional_arg(args, "score_normalization", runtime.score_normalization)
+    )
+    q_low = float(
+        _resolve_optional_arg(
+            args, "score_robust_quantile_low", runtime.score_robust_quantile_low
+        )
+    )
+    q_high = float(
+        _resolve_optional_arg(
+            args, "score_robust_quantile_high", runtime.score_robust_quantile_high
+        )
+    )
+    peak_prominence = float(
+        _resolve_optional_arg(args, "peak_prominence", runtime.peak_prominence)
+    )
+    peak_width = int(_resolve_optional_arg(args, "peak_width", runtime.peak_width))
+    return EventDetector(
+        normalization_mode=normalization,
+        robust_quantile_low=q_low,
+        robust_quantile_high=q_high,
+        peak_prominence=peak_prominence,
+        peak_width=peak_width,
+    )
+
+
+def _dataset_hash(data_dir: Path) -> str:
+    hasher = hashlib.sha256()
+    for name in ("manifest.csv", "calibrations.json"):
+        path = data_dir / name
+        hasher.update(name.encode("utf-8"))
+        if path.exists():
+            try:
+                hasher.update(path.read_bytes())
+            except OSError:
+                hasher.update(b"<unreadable>")
+    return hasher.hexdigest()
+
+
+def _code_version() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        revision = proc.stdout.strip()
+        return revision or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def _config_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _latency_summary(events: list[Event]) -> dict[str, float | int | None]:
+    latencies = [
+        float(event.gemini_latency_ms)
+        for event in events
+        if event.gemini_latency_ms is not None and np.isfinite(event.gemini_latency_ms)
+    ]
+    if not latencies:
+        return {
+            "count": 0,
+            "avg_ms": None,
+            "p50_ms": None,
+            "p95_ms": None,
+            "p99_ms": None,
+        }
+    arr = np.array(latencies, dtype=np.float64)
+    return {
+        "count": int(arr.size),
+        "avg_ms": float(arr.mean()),
+        "p50_ms": float(np.percentile(arr, 50)),
+        "p95_ms": float(np.percentile(arr, 95)),
+        "p99_ms": float(np.percentile(arr, 99)),
+    }
+
+
+def _build_run_metadata(
+    *,
+    data_dir: Path,
+    runtime: RuntimeConfig,
+    args: argparse.Namespace,
+    events: list[Event],
+) -> dict[str, Any]:
+    config_payload = {
+        "log_level": runtime.log_level,
+        "log_format": runtime.log_format,
+        "gemini_model": _resolve_optional_arg(args, "model", runtime.gemini_model),
+        "gemini_workers": _resolve_optional_arg(args, "gemini_workers", runtime.gemini_workers),
+        "gemini_retries": _resolve_optional_arg(args, "gemini_retries", runtime.gemini_retries),
+        "gemini_backoff_ms": _resolve_optional_arg(args, "gemini_backoff_ms", runtime.gemini_backoff_ms),
+        "depth_workers": _resolve_optional_arg(args, "depth_workers", runtime.depth_workers),
+        "score_normalization": _resolve_optional_arg(args, "score_normalization", runtime.score_normalization),
+        "score_q_low": _resolve_optional_arg(args, "score_robust_quantile_low", runtime.score_robust_quantile_low),
+        "score_q_high": _resolve_optional_arg(args, "score_robust_quantile_high", runtime.score_robust_quantile_high),
+        "peak_prominence": _resolve_optional_arg(args, "peak_prominence", runtime.peak_prominence),
+        "peak_width": _resolve_optional_arg(args, "peak_width", runtime.peak_width),
+        "peak_min_distance": _resolve_optional_arg(
+            args, "peak_min_distance", getattr(args, "distance_frames", runtime.peak_min_distance)
+        ),
+        "report_mode": _resolve_optional_arg(args, "report_mode", runtime.report_mode),
+        "report_telemetry_downsample": _resolve_optional_arg(
+            args,
+            "report_telemetry_downsample",
+            runtime.report_telemetry_downsample,
+        ),
+    }
+    return {
+        "dataset_hash": _dataset_hash(data_dir),
+        "code_version": _code_version(),
+        "config_fingerprint": _config_fingerprint(config_payload),
+        "latency_summary": _latency_summary(events),
+    }
 
 
 def _load_events_from_json(json_path: Path) -> list[Event]:
@@ -102,15 +271,24 @@ def _init_analyst(
     disable_gemini: bool,
     model: str,
     runtime: RuntimeConfig,
+    args: argparse.Namespace,
     logger: Any,
 ) -> tuple[GeminiAnalyst | None, str | None]:
     if disable_gemini:
         return None, "disabled_by_flag"
     try:
+        retries = int(_resolve_optional_arg(args, "gemini_retries", runtime.gemini_retries))
+        backoff_ms = int(
+            _resolve_optional_arg(args, "gemini_backoff_ms", runtime.gemini_backoff_ms)
+        )
+        cache_dir = _resolve_optional_arg(args, "gemini_cache_dir", runtime.gemini_cache_dir)
         return (
             GeminiAnalyst(
                 model=model,
                 timeout_sec=runtime.gemini_timeout_sec,
+                retries=retries,
+                backoff_ms=backoff_ms,
+                cache_dir=cache_dir,
             ),
             None,
         )
@@ -127,7 +305,11 @@ def _cmd_features(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any)
 
     log_event(logger, "info", "features_start", run_id=args.run_id, data_dir=str(data_dir))
     loader = LogLoader(data_dir=data_dir)
-    features_df = FeatureEngine(loader=loader).build_features()
+    features_df = _make_feature_engine(
+        loader=loader,
+        runtime=runtime,
+        args=args,
+    ).build_features()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     features_df.to_csv(output_path, index=False)
@@ -153,13 +335,18 @@ def _cmd_events(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
 
     log_event(logger, "info", "events_start", run_id=args.run_id, data_dir=str(data_dir))
     loader = LogLoader(data_dir=data_dir)
-    features_df = FeatureEngine(loader=loader).build_features()
-    detector = EventDetector()
+    features_df = _make_feature_engine(
+        loader=loader,
+        runtime=runtime,
+        args=args,
+    ).build_features()
+    detector = _make_event_detector(runtime, args)
 
     analyst, gemini_disabled_reason = _init_analyst(
         disable_gemini=args.disable_gemini,
         model=model,
         runtime=runtime,
+        args=args,
         logger=logger,
     )
 
@@ -168,12 +355,28 @@ def _cmd_events(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
         detector=detector,
         analyst=analyst,
         primary_camera=args.camera,
+        gemini_workers=int(
+            _resolve_optional_arg(args, "gemini_workers", runtime.gemini_workers)
+        ),
     )
     events = orchestrator.build_events(
         features_df=features_df,
         top_k=args.top_k,
         distance_frames=args.distance_frames,
         model=model if analyst is not None else None,
+        peak_prominence=float(
+            _resolve_optional_arg(args, "peak_prominence", runtime.peak_prominence)
+        ),
+        peak_width=int(_resolve_optional_arg(args, "peak_width", runtime.peak_width)),
+        min_distance_frames=int(
+            _resolve_optional_arg(args, "peak_min_distance", args.distance_frames)
+        ),
+    )
+    run_metadata = _build_run_metadata(
+        data_dir=data_dir,
+        runtime=runtime,
+        args=args,
+        events=events,
     )
 
     payload = {
@@ -186,13 +389,17 @@ def _cmd_events(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
         "peaks_found": int(detector.last_peak_count),
         "gemini_model": model if analyst is not None else None,
         "gemini_disabled_reason": gemini_disabled_reason,
+        "dataset_hash": run_metadata["dataset_hash"],
+        "code_version": run_metadata["code_version"],
+        "config_fingerprint": run_metadata["config_fingerprint"],
+        "latency_summary": run_metadata["latency_summary"],
         "events": orchestrator.serialize_events(events),
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    success_count = sum(1 for event in events if event.gemini_source in {"sdk", "rest"})
+    success_count = sum(1 for event in events if event.gemini_source in {"sdk", "rest", "cache"})
     elapsed = time.perf_counter() - started
     log_event(
         logger,
@@ -218,7 +425,12 @@ def _cmd_report(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
 
     log_event(logger, "info", "report_start", run_id=args.run_id, data_dir=str(data_dir))
     loader = LogLoader(data_dir)
-    features_df = FeatureEngine(loader=loader).build_features()
+    features_df = _make_feature_engine(
+        loader=loader,
+        runtime=runtime,
+        args=args,
+    ).build_features()
+    detector = _make_event_detector(runtime, args)
 
     if args.events_json is not None:
         events_json_path = _resolve_path(args.events_json)
@@ -236,14 +448,30 @@ def _cmd_report(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
             disable_gemini=args.disable_gemini,
             model=model,
             runtime=runtime,
+            args=args,
             logger=logger,
         )
-        orchestrator = IntelligenceOrchestrator(loader=loader, analyst=analyst)
+        orchestrator = IntelligenceOrchestrator(
+            loader=loader,
+            detector=detector,
+            analyst=analyst,
+            primary_camera=args.camera,
+            gemini_workers=int(
+                _resolve_optional_arg(args, "gemini_workers", runtime.gemini_workers)
+            ),
+        )
         events = orchestrator.build_events(
             features_df=features_df,
             top_k=args.top_k,
             distance_frames=args.distance_frames,
             model=model if analyst is not None else None,
+            peak_prominence=float(
+                _resolve_optional_arg(args, "peak_prominence", runtime.peak_prominence)
+            ),
+            peak_width=int(_resolve_optional_arg(args, "peak_width", runtime.peak_width)),
+            min_distance_frames=int(
+                _resolve_optional_arg(args, "peak_min_distance", args.distance_frames)
+            ),
         )
         log_event(
             logger,
@@ -254,14 +482,40 @@ def _cmd_report(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
         )
 
     if "severity_score" not in features_df.columns:
-        features_df = EventDetector().score_dataframe(features_df)
+        features_df = detector.score_dataframe(features_df)
 
+    run_metadata = _build_run_metadata(
+        data_dir=data_dir,
+        runtime=runtime,
+        args=args,
+        events=events,
+    )
+    ReportBuilder = _get_report_builder()
     builder = ReportBuilder(
         loader=loader,
         features_df=features_df,
         events=events,
-        metadata={"run_id": args.run_id},
+        metadata={
+            "run_id": args.run_id,
+            "dataset_hash": run_metadata["dataset_hash"],
+            "code_version": run_metadata["code_version"],
+            "config_fingerprint": run_metadata["config_fingerprint"],
+            "latency_summary": run_metadata["latency_summary"],
+        },
         include_surround=not args.no_surround,
+        report_mode=str(_resolve_optional_arg(args, "report_mode", runtime.report_mode)),
+        telemetry_downsample=int(
+            _resolve_optional_arg(
+                args,
+                "report_telemetry_downsample",
+                runtime.report_telemetry_downsample,
+            )
+        ),
+        feature_columns=tuple(
+            _resolve_optional_arg(
+                args, "report_feature_columns", runtime.report_feature_columns
+            )
+        ),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,15 +552,20 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
         output_report=str(output_report),
     )
     loader = LogLoader(data_dir=data_dir)
-    features_df = FeatureEngine(loader=loader).build_features()
+    features_df = _make_feature_engine(
+        loader=loader,
+        runtime=runtime,
+        args=args,
+    ).build_features()
     output_features.parent.mkdir(parents=True, exist_ok=True)
     features_df.to_csv(output_features, index=False)
 
-    detector = EventDetector()
+    detector = _make_event_detector(runtime, args)
     analyst, gemini_disabled_reason = _init_analyst(
         disable_gemini=args.disable_gemini,
         model=model,
         runtime=runtime,
+        args=args,
         logger=logger,
     )
     orchestrator = IntelligenceOrchestrator(
@@ -314,12 +573,28 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
         detector=detector,
         analyst=analyst,
         primary_camera=args.camera,
+        gemini_workers=int(
+            _resolve_optional_arg(args, "gemini_workers", runtime.gemini_workers)
+        ),
     )
     events = orchestrator.build_events(
         features_df=features_df,
         top_k=args.top_k,
         distance_frames=args.distance_frames,
         model=model if analyst is not None else None,
+        peak_prominence=float(
+            _resolve_optional_arg(args, "peak_prominence", runtime.peak_prominence)
+        ),
+        peak_width=int(_resolve_optional_arg(args, "peak_width", runtime.peak_width)),
+        min_distance_frames=int(
+            _resolve_optional_arg(args, "peak_min_distance", args.distance_frames)
+        ),
+    )
+    run_metadata = _build_run_metadata(
+        data_dir=data_dir,
+        runtime=runtime,
+        args=args,
+        events=events,
     )
 
     events_payload = {
@@ -332,6 +607,10 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
         "peaks_found": int(detector.last_peak_count),
         "gemini_model": model if analyst is not None else None,
         "gemini_disabled_reason": gemini_disabled_reason,
+        "dataset_hash": run_metadata["dataset_hash"],
+        "code_version": run_metadata["code_version"],
+        "config_fingerprint": run_metadata["config_fingerprint"],
+        "latency_summary": run_metadata["latency_summary"],
         "events": orchestrator.serialize_events(events),
     }
     output_events.parent.mkdir(parents=True, exist_ok=True)
@@ -340,12 +619,32 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
     if "severity_score" not in features_df.columns:
         features_df = detector.score_dataframe(features_df)
 
+    ReportBuilder = _get_report_builder()
     builder = ReportBuilder(
         loader=loader,
         features_df=features_df,
         events=events,
-        metadata={"run_id": args.run_id},
+        metadata={
+            "run_id": args.run_id,
+            "dataset_hash": run_metadata["dataset_hash"],
+            "code_version": run_metadata["code_version"],
+            "config_fingerprint": run_metadata["config_fingerprint"],
+            "latency_summary": run_metadata["latency_summary"],
+        },
         include_surround=not args.no_surround,
+        report_mode=str(_resolve_optional_arg(args, "report_mode", runtime.report_mode)),
+        telemetry_downsample=int(
+            _resolve_optional_arg(
+                args,
+                "report_telemetry_downsample",
+                runtime.report_telemetry_downsample,
+            )
+        ),
+        feature_columns=tuple(
+            _resolve_optional_arg(
+                args, "report_feature_columns", runtime.report_feature_columns
+            )
+        ),
     )
     output_report.parent.mkdir(parents=True, exist_ok=True)
     out = builder.save_report(output_report)
@@ -392,6 +691,11 @@ def _cmd_benchmark_gemini(args: argparse.Namespace, runtime: RuntimeConfig, logg
     analyst = GeminiAnalyst(
         model=model_names[0],
         timeout_sec=runtime.gemini_timeout_sec,
+        retries=int(_resolve_optional_arg(args, "gemini_retries", runtime.gemini_retries)),
+        backoff_ms=int(
+            _resolve_optional_arg(args, "gemini_backoff_ms", runtime.gemini_backoff_ms)
+        ),
+        cache_dir=_resolve_optional_arg(args, "gemini_cache_dir", runtime.gemini_cache_dir),
     )
 
     runs: list[dict[str, object]] = []
@@ -418,7 +722,7 @@ def _cmd_benchmark_gemini(args: argparse.Namespace, runtime: RuntimeConfig, logg
                         "output_tokens": result.output_tokens,
                         "thinking_tokens": result.thinking_tokens,
                         "total_tokens": result.total_tokens,
-                        "success": result.source in {"sdk", "rest"},
+                        "success": result.source in {"sdk", "rest", "cache"},
                     }
                 )
         model_durations_sec[model] = max(time.perf_counter() - model_start, 1e-9)
@@ -588,6 +892,96 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override log format (auto, json, console).",
     )
+    common.add_argument(
+        "--depth-workers",
+        type=int,
+        default=None,
+        help="Depth extraction workers override.",
+    )
+    common.add_argument(
+        "--depth-cache-dir",
+        type=Path,
+        default=None,
+        help="Persistent depth feature cache directory.",
+    )
+    common.add_argument(
+        "--gemini-workers",
+        type=int,
+        default=None,
+        help="Gemini analysis worker count override.",
+    )
+    common.add_argument(
+        "--gemini-retries",
+        type=int,
+        default=None,
+        help="Gemini retry count override.",
+    )
+    common.add_argument(
+        "--gemini-backoff-ms",
+        type=int,
+        default=None,
+        help="Gemini retry backoff in milliseconds override.",
+    )
+    common.add_argument(
+        "--gemini-cache-dir",
+        type=Path,
+        default=None,
+        help="Deterministic Gemini cache directory.",
+    )
+    common.add_argument(
+        "--score-normalization",
+        choices=["minmax", "robust"],
+        default=None,
+        help="Event scoring normalization mode override.",
+    )
+    common.add_argument(
+        "--score-robust-quantile-low",
+        type=float,
+        default=None,
+        help="Lower quantile for robust scaling.",
+    )
+    common.add_argument(
+        "--score-robust-quantile-high",
+        type=float,
+        default=None,
+        help="Upper quantile for robust scaling.",
+    )
+    common.add_argument(
+        "--peak-prominence",
+        type=float,
+        default=None,
+        help="Peak prominence override for event detection.",
+    )
+    common.add_argument(
+        "--peak-width",
+        type=int,
+        default=None,
+        help="Peak width override for event detection.",
+    )
+    common.add_argument(
+        "--peak-min-distance",
+        type=int,
+        default=None,
+        help="Minimum frame distance between peaks override.",
+    )
+    common.add_argument(
+        "--report-mode",
+        choices=["single", "split"],
+        default=None,
+        help="Report output mode override.",
+    )
+    common.add_argument(
+        "--report-telemetry-downsample",
+        type=int,
+        default=None,
+        help="Downsample factor for report telemetry/features payloads.",
+    )
+    common.add_argument(
+        "--report-feature-columns",
+        type=_parse_csv_columns,
+        default=None,
+        help="Comma-separated feature columns to embed in report payload.",
+    )
 
     parser = argparse.ArgumentParser(
         prog="agri-auditor",
@@ -706,6 +1100,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Gemini model name override.",
+    )
+    parser_report.add_argument(
+        "--camera",
+        type=str,
+        default=DEFAULT_CAMERA,
+        help=f"Primary camera for event analysis. Default: {DEFAULT_CAMERA}",
     )
     parser_report.set_defaults(handler=_cmd_report)
 

@@ -77,6 +77,26 @@ def test_process_disable_gemini_completes_and_writes_outputs() -> None:
             "150",
             "--disable-gemini",
             "--no-surround",
+            "--report-mode",
+            "split",
+            "--report-telemetry-downsample",
+            "2",
+            "--report-feature-columns",
+            "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps",
+            "--gemini-workers",
+            "2",
+            "--gemini-retries",
+            "1",
+            "--gemini-backoff-ms",
+            "0",
+            "--depth-workers",
+            "2",
+            "--peak-prominence",
+            "0.01",
+            "--peak-width",
+            "1",
+            "--peak-min-distance",
+            "150",
         ]
     )
     assert result.returncode == 0, (
@@ -94,6 +114,15 @@ def test_process_disable_gemini_completes_and_writes_outputs() -> None:
     payload = json.loads(events_output.read_text(encoding="utf-8"))
     assert len(payload["events"]) == 2
     assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
+    assert "dataset_hash" in payload
+    assert "code_version" in payload
+    assert "config_fingerprint" in payload
+    assert "latency_summary" in payload
+
+    assets_dir = report_output.with_name(f"{report_output.stem}_assets")
+    assert assets_dir.exists()
+    assert (assets_dir / "events.json").exists()
+    assert (assets_dir / "telemetry.json").exists()
 
 
 def test_legacy_script_wrappers_forward_to_cli_help() -> None:

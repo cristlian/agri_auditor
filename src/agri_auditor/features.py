@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,7 @@ DEFAULT_CLEARANCE_PERCENTILE = 5.0
 DEFAULT_WINDOW_SAMPLES_FALLBACK = 30
 DEFAULT_DEPTH_SUBDIR = "depth"
 DEFAULT_VELOCITY_GATE_MPS = 0.1
+DEFAULT_DEPTH_WORKERS = 4
 
 _QUAT_COLS = (
     "pose_front_center_stereo_left_qx",
@@ -37,6 +41,8 @@ class FeatureEngine:
         clearance_percentile: float = DEFAULT_CLEARANCE_PERCENTILE,
         canopy_crop_ratio: float = DEFAULT_CANOPY_CROP_RATIO,
         velocity_gate_mps: float = DEFAULT_VELOCITY_GATE_MPS,
+        depth_workers: int = DEFAULT_DEPTH_WORKERS,
+        depth_cache_dir: str | Path | None = None,
     ) -> None:
         if window_sec <= 0:
             raise ValueError("window_sec must be > 0.")
@@ -46,6 +52,8 @@ class FeatureEngine:
             raise ValueError("clearance_percentile must satisfy 0 <= percentile <= 100.")
         if not 0 < canopy_crop_ratio <= 1:
             raise ValueError("canopy_crop_ratio must satisfy 0 < ratio <= 1.")
+        if depth_workers <= 0:
+            raise ValueError("depth_workers must be > 0.")
 
         self.loader = loader
         self.window_sec = float(window_sec)
@@ -53,6 +61,13 @@ class FeatureEngine:
         self.clearance_percentile = float(clearance_percentile)
         self.canopy_crop_ratio = float(canopy_crop_ratio)
         self.velocity_gate_mps = float(velocity_gate_mps)
+        self.depth_workers = int(depth_workers)
+        self.depth_cache_dir = (
+            Path(depth_cache_dir).expanduser()
+            if depth_cache_dir is not None and str(depth_cache_dir).strip()
+            else None
+        )
+        self._depth_feature_memory_cache: dict[str, tuple[float, float]] = {}
 
     def build_features(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         base_df = self.loader.load_manifest() if df is None else df
@@ -73,12 +88,9 @@ class FeatureEngine:
         ].mean(axis=1, skipna=True)
 
         # --- Step 2 original: min clearance ---
-        clearance_and_canopy = [
-            self._compute_frame_depth_features(frame_idx, has_depth)
-            for frame_idx, has_depth in zip(
-                features_df["frame_idx"], features_df["has_depth"]
-            )
-        ]
+        clearance_and_canopy = self._compute_depth_features_batch(
+            features_df["frame_idx"], features_df["has_depth"]
+        )
         features_df["min_clearance_m"] = pd.Series(
             [c[0] for c in clearance_and_canopy],
             index=features_df.index,
@@ -237,6 +249,11 @@ class FeatureEngine:
         if not depth_path.exists():
             return (float("nan"), float("nan"))
 
+        cache_key = self._depth_cache_key(int(frame_number), depth_path)
+        cached = self._read_cached_depth_features(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             with Image.open(depth_path) as image:
                 depth_image = np.asarray(image)
@@ -265,7 +282,85 @@ class FeatureEngine:
             # Lower mean depth = denser canopy (things are closer overhead)
             canopy_density_proxy = float(np.mean(valid_upper)) / 1000.0
 
-        return (min_clearance_m, canopy_density_proxy)
+        result = (min_clearance_m, canopy_density_proxy)
+        self._write_cached_depth_features(cache_key, result)
+        return result
+
+    def _compute_depth_features_batch(
+        self,
+        frame_indices: pd.Series,
+        has_depth_series: pd.Series,
+    ) -> list[tuple[float, float]]:
+        work_items = list(zip(frame_indices.tolist(), has_depth_series.tolist()))
+        if self.depth_workers <= 1 or len(work_items) <= 1:
+            return [self._compute_frame_depth_features(frame_idx, has_depth) for frame_idx, has_depth in work_items]
+        with ThreadPoolExecutor(max_workers=self.depth_workers) as executor:
+            return list(
+                executor.map(
+                    lambda item: self._compute_frame_depth_features(item[0], item[1]),
+                    work_items,
+                )
+            )
+
+    def _depth_cache_key(self, frame_idx: int, depth_path: Path) -> str | None:
+        if self.depth_cache_dir is None:
+            return None
+        try:
+            stat = depth_path.stat()
+        except OSError:
+            return None
+        parts = (
+            str(frame_idx),
+            str(stat.st_mtime_ns),
+            str(stat.st_size),
+            f"{self.depth_crop_ratio:.6f}",
+            f"{self.canopy_crop_ratio:.6f}",
+            f"{self.clearance_percentile:.6f}",
+        )
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _read_cached_depth_features(self, cache_key: str | None) -> tuple[float, float] | None:
+        if self.depth_cache_dir is None or cache_key is None:
+            return None
+        if cache_key in self._depth_feature_memory_cache:
+            return self._depth_feature_memory_cache[cache_key]
+
+        cache_path = self.depth_cache_dir / f"{cache_key}.json"
+        if not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            clearance = payload.get("min_clearance_m")
+            canopy = payload.get("canopy_density_proxy")
+            result = (
+                float(clearance) if clearance is not None else float("nan"),
+                float(canopy) if canopy is not None else float("nan"),
+            )
+            self._depth_feature_memory_cache[cache_key] = result
+            return result
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _write_cached_depth_features(
+        self,
+        cache_key: str | None,
+        result: tuple[float, float],
+    ) -> None:
+        if self.depth_cache_dir is None or cache_key is None:
+            return
+        self._depth_feature_memory_cache[cache_key] = result
+        cache_path = self.depth_cache_dir / f"{cache_key}.json"
+        payload = {
+            "min_clearance_m": result[0] if np.isfinite(result[0]) else None,
+            "canopy_density_proxy": result[1] if np.isfinite(result[1]) else None,
+        }
+        try:
+            self.depth_cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_path.replace(cache_path)
+        except OSError:
+            return
 
     def _upper_crop(self, image: np.ndarray) -> np.ndarray:
         """Crop the upper portion of the image (canopy region)."""

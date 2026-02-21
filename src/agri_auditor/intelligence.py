@@ -1,12 +1,15 @@
 ﻿from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +39,11 @@ DEFAULT_TIMEOUT_SEC = 20.0
 DEFAULT_TEMPERATURE = 1.0  # Gemini 3 is optimized for temperature=1.0; lower values may cause looping
 DEFAULT_THINKING_LEVEL = "low"  # Minimizes latency for simple caption tasks
 DEFAULT_MAX_WORDS = 20
+DEFAULT_GEMINI_RETRIES = 2
+DEFAULT_GEMINI_BACKOFF_MS = 250
+DEFAULT_GEMINI_CIRCUIT_FAILURES = 3
+DEFAULT_GEMINI_CIRCUIT_COOLDOWN_SEC = 30.0
+DEFAULT_GEMINI_WORKERS = 4
 UNAVAILABLE_CAPTION = "AI Analysis Unavailable"
 
 RECOVERABLE_ANALYSIS_ERRORS = (
@@ -141,6 +149,11 @@ class EventDetector:
         imu_fault_weight: float = DEFAULT_IMU_FAULT_WEIGHT,
         localization_fault_weight: float = DEFAULT_LOCALIZATION_FAULT_WEIGHT,
         clearance_safe_m: float = DEFAULT_CLEARANCE_SAFE_M,
+        normalization_mode: str = "robust",
+        robust_quantile_low: float = 0.05,
+        robust_quantile_high: float = 0.95,
+        peak_prominence: float = 0.05,
+        peak_width: int = 1,
     ) -> None:
         weights = [roughness_weight, proximity_weight, yaw_rate_weight,
                     imu_fault_weight, localization_fault_weight]
@@ -150,6 +163,14 @@ class EventDetector:
             raise ValueError("At least one scoring weight must be > 0.")
         if clearance_safe_m <= 0:
             raise ValueError("clearance_safe_m must be > 0.")
+        if normalization_mode not in {"minmax", "robust"}:
+            raise ValueError("normalization_mode must be 'minmax' or 'robust'.")
+        if not 0 <= robust_quantile_low < robust_quantile_high <= 1:
+            raise ValueError("robust quantiles must satisfy 0 <= low < high <= 1.")
+        if peak_prominence < 0:
+            raise ValueError("peak_prominence must be >= 0.")
+        if peak_width <= 0:
+            raise ValueError("peak_width must be > 0.")
 
         self.roughness_weight = float(roughness_weight)
         self.proximity_weight = float(proximity_weight)
@@ -157,6 +178,11 @@ class EventDetector:
         self.imu_fault_weight = float(imu_fault_weight)
         self.localization_fault_weight = float(localization_fault_weight)
         self.clearance_safe_m = float(clearance_safe_m)
+        self.normalization_mode = normalization_mode
+        self.robust_quantile_low = float(robust_quantile_low)
+        self.robust_quantile_high = float(robust_quantile_high)
+        self.peak_prominence = float(peak_prominence)
+        self.peak_width = int(peak_width)
         self.last_peak_count: int = 0
         self.last_peak_indices: np.ndarray = np.array([], dtype=np.int64)
 
@@ -165,15 +191,30 @@ class EventDetector:
         df: pd.DataFrame,
         top_k: int = DEFAULT_TOP_K,
         distance_frames: int = DEFAULT_PEAK_DISTANCE_FRAMES,
+        peak_prominence: float | None = None,
+        peak_width: int | None = None,
+        min_distance_frames: int | None = None,
     ) -> list[EventCandidate]:
         if top_k <= 0:
             raise ValueError("top_k must be > 0.")
-        if distance_frames <= 0:
-            raise ValueError("distance_frames must be > 0.")
+        effective_distance = min_distance_frames if min_distance_frames is not None else distance_frames
+        if effective_distance <= 0:
+            raise ValueError("distance_frames/min_distance_frames must be > 0.")
+        effective_prominence = self.peak_prominence if peak_prominence is None else float(peak_prominence)
+        if effective_prominence < 0:
+            raise ValueError("peak_prominence must be >= 0.")
+        effective_width = self.peak_width if peak_width is None else int(peak_width)
+        if effective_width <= 0:
+            raise ValueError("peak_width must be > 0.")
 
         scored_df = self.score_dataframe(df)
         severity = pd.to_numeric(scored_df["severity_score"], errors="coerce").fillna(0.0)
-        peak_indices, _ = find_peaks(severity.to_numpy(dtype=np.float64), distance=distance_frames)
+        peak_indices, _ = find_peaks(
+            severity.to_numpy(dtype=np.float64),
+            distance=int(effective_distance),
+            prominence=effective_prominence if effective_prominence > 0 else None,
+            width=effective_width,
+        )
         self.last_peak_count = int(len(peak_indices))
         self.last_peak_indices = peak_indices.astype(np.int64, copy=False)
 
@@ -255,8 +296,8 @@ class EventDetector:
         )
         pose_conf_raw = pose_conf_raw.fillna(100.0)
 
-        roughness_norm = self._minmax_normalize(roughness_raw)
-        yaw_rate_norm = self._minmax_normalize(yaw_rate_abs_raw)
+        roughness_norm = self._normalize(roughness_raw)
+        yaw_rate_norm = self._normalize(yaw_rate_abs_raw)
         # Inverse semantics: lower IMU correlation means higher sensor-fault severity.
         imu_fault_norm = self._invert_normalize(imu_corr_raw)
         # Inverse semantics: lower pose confidence means higher localization-fault severity.
@@ -298,7 +339,12 @@ class EventDetector:
         if finite.empty:
             return pd.Series(np.zeros(len(filled), dtype=np.float64), index=filled.index)
 
-        min_clearance = float(finite.min())
+        if self.normalization_mode == "robust":
+            min_clearance = float(
+                finite.quantile(self.robust_quantile_low, interpolation="linear")
+            )
+        else:
+            min_clearance = float(finite.min())
         denominator = self.clearance_safe_m - min_clearance
         if not np.isfinite(denominator) or denominator <= 0.0:
             return pd.Series(np.zeros(len(filled), dtype=np.float64), index=filled.index)
@@ -308,7 +354,9 @@ class EventDetector:
         return proximity_norm.clip(lower=0.0, upper=1.0)
 
     @staticmethod
-    def _minmax_normalize(values: pd.Series) -> pd.Series:
+    def _minmax_normalize(
+        values: pd.Series, *, fill_value: float | None = None
+    ) -> pd.Series:
         numeric = pd.to_numeric(values, errors="coerce").astype("float64")
         finite_values = numeric[np.isfinite(numeric)]
         if finite_values.empty:
@@ -316,7 +364,7 @@ class EventDetector:
 
         min_value = float(finite_values.min())
         max_value = float(finite_values.max())
-        filled = numeric.fillna(min_value)
+        filled = numeric.fillna(min_value if fill_value is None else float(fill_value))
 
         denominator = max_value - min_value
         if not np.isfinite(denominator) or denominator <= 0.0:
@@ -326,25 +374,58 @@ class EventDetector:
         normalized = normalized.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         return normalized.clip(lower=0.0, upper=1.0)
 
-    @staticmethod
-    def _invert_normalize(values: pd.Series) -> pd.Series:
-        """Min-max normalize then invert: low original value 鈫?high output."""
+    def _robust_normalize(
+        self,
+        values: pd.Series,
+        *,
+        fill_value: float | None = None,
+    ) -> pd.Series:
         numeric = pd.to_numeric(values, errors="coerce").astype("float64")
         finite_values = numeric[np.isfinite(numeric)]
         if finite_values.empty:
             return pd.Series(np.zeros(len(numeric), dtype=np.float64), index=numeric.index)
 
-        min_value = float(finite_values.min())
-        max_value = float(finite_values.max())
-        filled = numeric.fillna(max_value)  # NaN 鈫?high value 鈫?low fault
+        q_low = float(
+            finite_values.quantile(self.robust_quantile_low, interpolation="linear")
+        )
+        q_high = float(
+            finite_values.quantile(self.robust_quantile_high, interpolation="linear")
+        )
+        if not np.isfinite(q_low) or not np.isfinite(q_high) or q_high <= q_low:
+            return self._minmax_normalize(numeric, fill_value=fill_value)
 
-        denominator = max_value - min_value
-        if not np.isfinite(denominator) or denominator <= 0.0:
-            return pd.Series(np.zeros(len(filled), dtype=np.float64), index=filled.index)
+        clipped = numeric.clip(lower=q_low, upper=q_high)
+        baseline = float(np.median(clipped[np.isfinite(clipped)]))
+        filled = clipped.fillna(baseline if fill_value is None else float(fill_value))
+        mad = float(np.median(np.abs(filled - baseline)))
+        if not np.isfinite(mad) or mad <= 1e-12:
+            return self._minmax_normalize(filled, fill_value=fill_value)
 
-        # Invert: low confidence 鈫?high fault score
-        normalized = (max_value - filled) / denominator
+        robust_sigma = 1.4826 * mad
+        zscore = (filled - baseline) / robust_sigma
+        clipped_z = zscore.clip(lower=-3.0, upper=3.0)
+        normalized = (clipped_z + 3.0) / 6.0
         normalized = normalized.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        return normalized.clip(lower=0.0, upper=1.0)
+
+    def _normalize(self, values: pd.Series) -> pd.Series:
+        if self.normalization_mode == "robust":
+            return self._robust_normalize(values)
+        return self._minmax_normalize(values)
+
+    def _invert_normalize(self, values: pd.Series) -> pd.Series:
+        """Normalize then invert: low original value -> high output."""
+        numeric = pd.to_numeric(values, errors="coerce").astype("float64")
+        finite_values = numeric[np.isfinite(numeric)]
+        if finite_values.empty:
+            return pd.Series(np.zeros(len(numeric), dtype=np.float64), index=numeric.index)
+
+        max_value = float(finite_values.max())
+        if self.normalization_mode == "robust":
+            normalized = self._robust_normalize(numeric, fill_value=max_value)
+        else:
+            normalized = self._minmax_normalize(numeric, fill_value=max_value)
+        normalized = 1.0 - normalized
         return normalized.clip(lower=0.0, upper=1.0)
 
     @staticmethod
@@ -403,6 +484,11 @@ class GeminiAnalyst:
         temperature: float = DEFAULT_TEMPERATURE,
         max_words: int = DEFAULT_MAX_WORDS,
         thinking_level: str = DEFAULT_THINKING_LEVEL,
+        retries: int = DEFAULT_GEMINI_RETRIES,
+        backoff_ms: int = DEFAULT_GEMINI_BACKOFF_MS,
+        cache_dir: str | Path | None = None,
+        circuit_failure_threshold: int = DEFAULT_GEMINI_CIRCUIT_FAILURES,
+        circuit_cooldown_sec: float = DEFAULT_GEMINI_CIRCUIT_COOLDOWN_SEC,
     ) -> None:
         # Auto-load .env file for API key if present
         load_dotenv(override=False)
@@ -413,6 +499,14 @@ class GeminiAnalyst:
             raise ValueError("timeout_sec must be > 0.")
         if max_words <= 0:
             raise ValueError("max_words must be > 0.")
+        if retries < 0:
+            raise ValueError("retries must be >= 0.")
+        if backoff_ms < 0:
+            raise ValueError("backoff_ms must be >= 0.")
+        if circuit_failure_threshold <= 0:
+            raise ValueError("circuit_failure_threshold must be > 0.")
+        if circuit_cooldown_sec < 0:
+            raise ValueError("circuit_cooldown_sec must be >= 0.")
 
         self.api_key = resolved_key
         self.model = model
@@ -421,6 +515,20 @@ class GeminiAnalyst:
         self.temperature = float(temperature)
         self.max_words = int(max_words)
         self.thinking_level = str(thinking_level)
+        self.retries = int(retries)
+        self.backoff_ms = int(backoff_ms)
+        self.cache_dir = (
+            Path(cache_dir).expanduser()
+            if cache_dir is not None and str(cache_dir).strip()
+            else None
+        )
+        self.circuit_failure_threshold = int(circuit_failure_threshold)
+        self.circuit_cooldown_sec = float(circuit_cooldown_sec)
+
+        self._cache_lock = threading.Lock()
+        self._circuit_lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._circuit_open_until_monotonic = 0.0
 
     def analyze_image(self, image_path: str | Path, model: str | None = None) -> GeminiAnalysisResult:
         path = Path(image_path)
@@ -446,31 +554,94 @@ class GeminiAnalyst:
             )
 
         mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-        try:
-            result = self._analyze_with_sdk(
-                image_bytes=image_bytes,
-                mime_type=mime_type,
-                model=selected_model,
-            )
-            return self._normalize_result(result)
-        except RECOVERABLE_ANALYSIS_ERRORS as sdk_error:
-            sdk_message = str(sdk_error)
+        cache_key = self._cache_key(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            model=selected_model,
+        )
+        cached = self._read_cached_result(cache_key, model=selected_model)
+        if cached is not None:
+            return cached
 
-        try:
-            result = self._analyze_with_rest(
-                image_bytes=image_bytes,
-                mime_type=mime_type,
-                model=selected_model,
-            )
-            return self._normalize_result(result)
-        except RECOVERABLE_ANALYSIS_ERRORS as rest_error:
+        if self._is_circuit_open():
             return GeminiAnalysisResult(
                 caption=UNAVAILABLE_CAPTION,
                 model=selected_model,
                 source="unavailable",
                 latency_ms=None,
-                error=f"sdk_error={sdk_message}; rest_error={rest_error}",
+                error=(
+                    "Gemini circuit breaker open; suppressing requests "
+                    f"for {self.circuit_cooldown_sec:.1f}s cooldown."
+                ),
             )
+
+        attempt_errors: list[str] = []
+        max_attempts = self.retries + 1
+        for attempt_idx in range(max_attempts):
+            try:
+                result = self._analyze_once(
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    model=selected_model,
+                )
+                normalized = self._normalize_result(result)
+                self._record_success()
+                self._write_cached_result(cache_key, normalized)
+                return normalized
+            except RECOVERABLE_ANALYSIS_ERRORS as exc:
+                message = str(exc)
+                attempt_errors.append(message)
+                should_retry = (
+                    attempt_idx < max_attempts - 1
+                    and self._is_retryable_error(message)
+                )
+                if should_retry:
+                    backoff_sec = (self.backoff_ms / 1000.0) * (2 ** attempt_idx)
+                    if backoff_sec > 0:
+                        time.sleep(backoff_sec)
+                    continue
+                break
+
+        self._record_failure()
+        error_msg = "; ".join(
+            f"attempt_{idx + 1}={msg}" for idx, msg in enumerate(attempt_errors)
+        )
+        if not error_msg:
+            error_msg = "Unknown Gemini failure."
+        return GeminiAnalysisResult(
+            caption=UNAVAILABLE_CAPTION,
+            model=selected_model,
+            source="unavailable",
+            latency_ms=None,
+            error=error_msg,
+        )
+
+    def _analyze_once(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        model: str,
+    ) -> GeminiAnalysisResult:
+        try:
+            return self._analyze_with_sdk(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                model=model,
+            )
+        except RECOVERABLE_ANALYSIS_ERRORS as sdk_error:
+            sdk_message = str(sdk_error)
+
+        try:
+            return self._analyze_with_rest(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                model=model,
+            )
+        except RECOVERABLE_ANALYSIS_ERRORS as rest_error:
+            raise RuntimeError(
+                f"sdk_error={sdk_message}; rest_error={rest_error}"
+            ) from rest_error
 
     def _normalize_result(self, result: GeminiAnalysisResult) -> GeminiAnalysisResult:
         normalized_caption = _truncate_words(result.caption, self.max_words)
@@ -720,6 +891,111 @@ class GeminiAnalyst:
             total_tokens = input_tokens + output_tokens
         return input_tokens, output_tokens, thinking_tokens, total_tokens
 
+    @staticmethod
+    def _is_retryable_error(message: str) -> bool:
+        lowered = message.lower()
+        if "http 400" in lowered or "http 401" in lowered or "http 403" in lowered or "http 404" in lowered:
+            return False
+        return True
+
+    def _cache_key(self, *, image_bytes: bytes, mime_type: str, model: str) -> str | None:
+        if self.cache_dir is None:
+            return None
+        hasher = hashlib.sha256()
+        hasher.update(model.encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(self.prompt.encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(mime_type.encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(str(self.temperature).encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(self.thinking_level.encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(str(self.max_words).encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(image_bytes)
+        return hasher.hexdigest()
+
+    def _read_cached_result(
+        self,
+        cache_key: str | None,
+        *,
+        model: str,
+    ) -> GeminiAnalysisResult | None:
+        if self.cache_dir is None or cache_key is None:
+            return None
+        cache_path = self.cache_dir / f"{cache_key}.json"
+        if not cache_path.exists():
+            return None
+
+        try:
+            with self._cache_lock:
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            return GeminiAnalysisResult(
+                caption=str(payload.get("caption", UNAVAILABLE_CAPTION)),
+                model=str(payload.get("model", model)),
+                source="cache",
+                latency_ms=0.0,
+                error=None,
+                input_tokens=_safe_int(payload.get("input_tokens")),
+                output_tokens=_safe_int(payload.get("output_tokens")),
+                thinking_tokens=_safe_int(payload.get("thinking_tokens")),
+                total_tokens=_safe_int(payload.get("total_tokens")),
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _write_cached_result(
+        self,
+        cache_key: str | None,
+        result: GeminiAnalysisResult,
+    ) -> None:
+        if self.cache_dir is None or cache_key is None:
+            return
+        if result.source not in {"sdk", "rest"}:
+            return
+
+        payload = {
+            "caption": result.caption,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "thinking_tokens": result.thinking_tokens,
+            "total_tokens": result.total_tokens,
+        }
+        cache_path = self.cache_dir / f"{cache_key}.json"
+        try:
+            with self._cache_lock:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = cache_path.with_suffix(".tmp")
+                tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+                tmp_path.replace(cache_path)
+        except OSError:
+            return
+
+    def _is_circuit_open(self) -> bool:
+        now = time.monotonic()
+        with self._circuit_lock:
+            if now >= self._circuit_open_until_monotonic:
+                self._circuit_open_until_monotonic = 0.0
+                return False
+            return True
+
+    def _record_success(self) -> None:
+        with self._circuit_lock:
+            self._consecutive_failures = 0
+            self._circuit_open_until_monotonic = 0.0
+
+    def _record_failure(self) -> None:
+        with self._circuit_lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.circuit_failure_threshold:
+                self._circuit_open_until_monotonic = (
+                    time.monotonic() + self.circuit_cooldown_sec
+                )
+                self._consecutive_failures = 0
+
 
 class IntelligenceOrchestrator:
     def __init__(
@@ -729,12 +1005,16 @@ class IntelligenceOrchestrator:
         analyst: GeminiAnalyst | None = None,
         primary_camera: str = DEFAULT_PRIMARY_CAMERA,
         cameras: tuple[str, ...] = ALL_CAMERAS,
+        gemini_workers: int = DEFAULT_GEMINI_WORKERS,
     ) -> None:
+        if gemini_workers <= 0:
+            raise ValueError("gemini_workers must be > 0.")
         self.loader = loader
         self.detector = detector or EventDetector()
         self.analyst = analyst
         self.primary_camera = primary_camera
         self.cameras = cameras
+        self.gemini_workers = int(gemini_workers)
 
     def build_events(
         self,
@@ -742,6 +1022,9 @@ class IntelligenceOrchestrator:
         top_k: int = DEFAULT_TOP_K,
         distance_frames: int = DEFAULT_PEAK_DISTANCE_FRAMES,
         model: str | None = None,
+        peak_prominence: float | None = None,
+        peak_width: int | None = None,
+        min_distance_frames: int | None = None,
     ) -> list[Event]:
         feature_table = (
             FeatureEngine(loader=self.loader).build_features()
@@ -752,19 +1035,31 @@ class IntelligenceOrchestrator:
             feature_table,
             top_k=top_k,
             distance_frames=distance_frames,
+            peak_prominence=peak_prominence,
+            peak_width=peak_width,
+            min_distance_frames=min_distance_frames,
         )
 
-        events: list[Event] = []
-        for rank, candidate in enumerate(candidates, start=1):
+        camera_path_batches: list[dict[str, str]] = []
+        primary_paths: list[Path] = []
+        for candidate in candidates:
             camera_paths = self._resolve_all_camera_paths(candidate.frame_idx)
+            camera_path_batches.append(camera_paths)
             primary_path = camera_paths.get(
                 self.primary_camera,
                 next(iter(camera_paths.values()), ""),
             )
-            analysis = self._analyze_event_frame(
-                image_path=Path(primary_path) if primary_path else Path("."),
-                model=model,
-            )
+            primary_paths.append(Path(primary_path) if primary_path else Path("."))
+
+        analyses = self._batch_analyze_event_frames(
+            image_paths=primary_paths,
+            model=model,
+        )
+
+        events: list[Event] = []
+        for rank, candidate in enumerate(candidates, start=1):
+            analysis = analyses[rank - 1]
+            camera_paths = camera_path_batches[rank - 1]
             events.append(
                 Event(
                     event_rank=rank,
@@ -822,6 +1117,55 @@ class IntelligenceOrchestrator:
                 latency_ms=None,
                 error=f"Unexpected analyst error: {exc}",
             )
+
+    def _batch_analyze_event_frames(
+        self,
+        *,
+        image_paths: list[Path],
+        model: str | None,
+    ) -> list[GeminiAnalysisResult]:
+        if not image_paths:
+            return []
+        if self.analyst is None or self.gemini_workers <= 1:
+            return [
+                self._analyze_event_frame(image_path=image_path, model=model)
+                for image_path in image_paths
+            ]
+
+        results: list[GeminiAnalysisResult | None] = [None] * len(image_paths)
+        with ThreadPoolExecutor(max_workers=self.gemini_workers) as executor:
+            future_to_index = {
+                executor.submit(
+                    self._analyze_event_frame,
+                    image_path=image_path,
+                    model=model,
+                ): idx
+                for idx, image_path in enumerate(image_paths)
+            }
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                try:
+                    results[idx] = future.result()
+                except RECOVERABLE_ANALYSIS_ERRORS as exc:
+                    results[idx] = GeminiAnalysisResult(
+                        caption=UNAVAILABLE_CAPTION,
+                        model=model,
+                        source="unavailable",
+                        latency_ms=None,
+                        error=f"Unexpected analyst error: {exc}",
+                    )
+        return [
+            result
+            if result is not None
+            else GeminiAnalysisResult(
+                caption=UNAVAILABLE_CAPTION,
+                model=model,
+                source="unavailable",
+                latency_ms=None,
+                error="Missing analysis result.",
+            )
+            for result in results
+        ]
 
     def _resolve_all_camera_paths(self, frame_idx: int) -> dict[str, str]:
         """Resolve image paths for all surround-view cameras at this frame."""

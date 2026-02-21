@@ -21,6 +21,21 @@ def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGRI_AUDITOR_LOG_FORMAT",
         "AGRI_AUDITOR_GEMINI_MODEL",
         "AGRI_AUDITOR_GEMINI_TIMEOUT_SEC",
+        "AGRI_AUDITOR_GEMINI_WORKERS",
+        "AGRI_AUDITOR_GEMINI_RETRIES",
+        "AGRI_AUDITOR_GEMINI_BACKOFF_MS",
+        "AGRI_AUDITOR_GEMINI_CACHE_DIR",
+        "AGRI_AUDITOR_DEPTH_WORKERS",
+        "AGRI_AUDITOR_DEPTH_CACHE_DIR",
+        "AGRI_AUDITOR_SCORE_NORMALIZATION",
+        "AGRI_AUDITOR_SCORE_Q_LOW",
+        "AGRI_AUDITOR_SCORE_Q_HIGH",
+        "AGRI_AUDITOR_PEAK_PROMINENCE",
+        "AGRI_AUDITOR_PEAK_WIDTH",
+        "AGRI_AUDITOR_PEAK_MIN_DISTANCE",
+        "AGRI_AUDITOR_REPORT_MODE",
+        "AGRI_AUDITOR_REPORT_TELEMETRY_DOWNSAMPLE",
+        "AGRI_AUDITOR_REPORT_FEATURE_COLUMNS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -49,6 +64,15 @@ def test_load_runtime_config_invalid_timeout(monkeypatch: pytest.MonkeyPatch) ->
         load_runtime_config()
 
 
+def test_load_runtime_config_accepts_numeric_log_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("AGRI_AUDITOR_LOG_LEVEL", "20")
+    config = load_runtime_config()
+    assert config.log_level == "20"
+
+
 def test_resolve_log_format_auto_non_tty_is_json() -> None:
     stream = io.StringIO()
     assert resolve_log_format("auto", stream=stream) == "json"
@@ -65,6 +89,10 @@ def test_resolve_log_format_auto_tty_is_console() -> None:
 def test_configure_logging_accepts_json_and_console() -> None:
     assert configure_logging("INFO", "json") == "json"
     assert configure_logging("INFO", "console") == "console"
+
+
+def test_configure_logging_accepts_numeric_level() -> None:
+    assert configure_logging("20", "json") == "json"
 
 
 def test_log_event_emits_without_error() -> None:

@@ -1,4 +1,4 @@
-"""Step 4: Mission Control Dashboard — interactive HTML report generator.
+﻿"""Step 4: Mission Control Dashboard 鈥?interactive HTML report generator.
 
 Generates a self-contained ``audit_report.html`` with:
   - Production-ready 'Cockpit' layout fitting 1080p viewport without scrolling
@@ -9,16 +9,17 @@ Generates a self-contained ``audit_report.html`` with:
   - AI Event Cards with Gemini captions and signal decomposition
 
 Architectural Principles:
-  1. Viewport Density — CSS Grid cockpit layout, no page scrolling
-  2. Semantic Grounding — Leaflet map with dark tiles, path + event markers
-  3. Cross-Dimensional Interactivity — Global state linking all components
-  4. MLOps Actionability — Triage buttons, JSON payloads, clipboard + toast
+  1. Viewport Density 鈥?CSS Grid cockpit layout, no page scrolling
+  2. Semantic Grounding 鈥?Leaflet map with dark tiles, path + event markers
+  3. Cross-Dimensional Interactivity 鈥?Global state linking all components
+  4. MLOps Actionability 鈥?Triage buttons, JSON payloads, clipboard + toast
 """
 from __future__ import annotations
 
 import base64
 import io
 import json
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,10 @@ import pandas as pd
 from PIL import Image
 
 try:
-    from jinja2 import Template
+    from jinja2 import Environment, select_autoescape
 except ImportError as exc:
     raise ImportError(
-        "jinja2 is required for report generation: pip install jinja2"
+        "jinja2 is required for report generation: pip install agri-auditor[report]"
     ) from exc
 
 try:
@@ -39,18 +40,18 @@ try:
     from plotly.subplots import make_subplots
 except ImportError as exc:
     raise ImportError(
-        "plotly is required for report generation: pip install plotly"
+        "plotly is required for report generation: pip install agri-auditor[report]"
     ) from exc
 
 from .ingestion import LogLoader
 from .intelligence import Event, EventDetector, UNAVAILABLE_CAPTION
 
 
-# ─── Color Palette — "Telemetry Command" Theme ──────────────────────────────
+# 鈹€鈹€鈹€ Color Palette 鈥?"Telemetry Command" Theme 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Custom theme inspired by theme-factory's Tech Innovation + Ocean Depths,
 # designed for a retro-futuristic mission control aesthetic.
 # (frontend-design skill: bold, distinctive, cohesive palette with dominant
-#  cyan accent — NOT generic purple gradients or timid distributions)
+#  cyan accent 鈥?NOT generic purple gradients or timid distributions)
 
 COLORS = {
     "bg_primary": "#060a13",
@@ -71,7 +72,7 @@ COLORS = {
     "cyan": "#00e5ff",
 }
 
-# ─── Severity Scoring Thresholds (code-refactoring: replace magic numbers) ───
+# 鈹€鈹€鈹€ Severity Scoring Thresholds (code-refactoring: replace magic numbers) 鈹€鈹€鈹€
 
 SEVERITY_WARNING_THRESHOLD = 0.4
 SEVERITY_CRITICAL_THRESHOLD = 0.7
@@ -93,14 +94,32 @@ SIGNAL_COLORS: dict[str, str] = {
     "Localization": COLORS["purple"],
 }
 
-# ─── Image Encoding Defaults ─────────────────────────────────────────────────
+# 鈹€鈹€鈹€ Image Encoding Defaults 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 DEFAULT_IMAGE_MAX_WIDTH = 640
 DEFAULT_THUMB_MAX_WIDTH = 200
 DEFAULT_IMAGE_QUALITY = 82
 DEFAULT_INCLUDE_SURROUND = True
+DEFAULT_REPORT_MODE = "single"
+DEFAULT_TELEMETRY_DOWNSAMPLE = 1
+DEFAULT_REPORT_FEATURE_COLUMNS: tuple[str, ...] = (
+    "frame_idx",
+    "timestamp_sec",
+    "_elapsed",
+    "gps_lat",
+    "gps_lon",
+    "velocity_mps",
+    "pitch",
+    "roll",
+    "min_clearance_m",
+    "roughness",
+    "yaw_rate",
+    "imu_correlation",
+    "pose_confidence",
+    "severity_score",
+)
 
-# ─── Chart Dimensions ────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€ Chart Dimensions 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 CHART_TELEMETRY_HEIGHT = 870
 CHART_SPARKLINE_HEIGHT = 55
@@ -116,7 +135,7 @@ _PLACEHOLDER_IMAGE = (
 )
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# 鈹€鈹€ Utilities 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
 def _severity_color(score: float) -> str:
@@ -183,8 +202,8 @@ def _elapsed(ts_series: pd.Series) -> pd.Series:
     return (ts - start).astype("float64")
 
 
-# ── Plotly helpers ────────────────────────────────────────────────────────────
-# (frontend-design: distinctive typography — Space Grotesk / IBM Plex Mono,
+# 鈹€鈹€ Plotly helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# (frontend-design: distinctive typography 鈥?Space Grotesk / IBM Plex Mono,
 #  NOT the overused Inter / JetBrains Mono)
 
 
@@ -231,10 +250,8 @@ def _layout(**kw: Any) -> dict[str, Any]:
     return base
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ReportBuilder
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# ReportBuilder
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 class ReportBuilder:
     """Generate an interactive Mission Control HTML dashboard."""
@@ -249,6 +266,9 @@ class ReportBuilder:
         image_max_width: int = DEFAULT_IMAGE_MAX_WIDTH,
         thumb_max_width: int = DEFAULT_THUMB_MAX_WIDTH,
         image_quality: int = DEFAULT_IMAGE_QUALITY,
+        report_mode: str = DEFAULT_REPORT_MODE,
+        telemetry_downsample: int = DEFAULT_TELEMETRY_DOWNSAMPLE,
+        feature_columns: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         self.loader = loader
         self.features_df = features_df.copy()
@@ -258,23 +278,56 @@ class ReportBuilder:
         self.image_max_width = image_max_width
         self.thumb_max_width = thumb_max_width
         self.image_quality = image_quality
+        normalized_mode = str(report_mode).strip().lower()
+        if normalized_mode not in {"single", "split"}:
+            raise ValueError("report_mode must be 'single' or 'split'.")
+        if telemetry_downsample <= 0:
+            raise ValueError("telemetry_downsample must be > 0.")
+        self.report_mode = normalized_mode
+        self.telemetry_downsample = int(telemetry_downsample)
+        selected = list(feature_columns or [])
+        self.feature_columns = tuple(
+            col for col in (*DEFAULT_REPORT_FEATURE_COLUMNS, *selected) if col
+        )
 
         self.features_df["_elapsed"] = _elapsed(self.features_df["timestamp_sec"])
+        self.report_df = self._downsample_for_report(self.features_df)
         ts = pd.to_numeric(self.features_df["timestamp_sec"], errors="coerce")
         self._t0 = float(ts.min()) if ts.notna().any() else 0.0
 
-    # ── Public API ────────────────────────────────────────────────────────
+    # 鈹€鈹€ Public API 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def save_report(self, output_path: str | Path) -> Path:
         out = Path(output_path)
-        out.write_text(self._render(), encoding="utf-8")
+        payload = self._build_payload()
+        asset_paths: dict[str, str] = {}
+        if self.report_mode == "split":
+            asset_paths = self._write_split_assets(out, payload)
+        out.write_text(
+            self._render(payload=payload, asset_paths=asset_paths),
+            encoding="utf-8",
+        )
         return out
 
-    # ── Private rendering ─────────────────────────────────────────────────
+    # 鈹€鈹€ Private rendering 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    def _render(self) -> str:
-        events_ctx = [self._event_ctx(e) for e in self.events]
-        gps_path = self._gps_path_data()
+    def _render(
+        self,
+        *,
+        payload: dict[str, Any] | None = None,
+        asset_paths: dict[str, str] | None = None,
+    ) -> str:
+        bundle = payload if payload is not None else self._build_payload()
+        resolved_assets = asset_paths or {}
+        inline_b64: dict[str, str] = {}
+        if self.report_mode == "single":
+            for key, value in bundle.items():
+                encoded = json.dumps(value, separators=(",", ":"), default=str).encode(
+                    "utf-8"
+                )
+                inline_b64[key] = base64.b64encode(encoded).decode("ascii")
+
+        csp_nonce = secrets.token_urlsafe(18)
         ctx: dict[str, Any] = {
             "title": self.metadata.get("title", "Agri-Auditor Mission Control"),
             "run_id": self.metadata.get("run_id", "audit-run"),
@@ -282,15 +335,73 @@ class ReportBuilder:
                 "%Y-%m-%d %H:%M:%S UTC"
             ),
             "summary": self._summary(),
-            "telemetry_json": self._chart_telemetry().to_json(),
-            "events": events_ctx,
-            "events_json_str": json.dumps(events_ctx, default=str),
-            "gps_path_json": json.dumps(gps_path),
-            "features_json": self.features_df.to_json(orient="records"),
+            "events": bundle["events"],
+            "report_mode": self.report_mode,
+            "data_inline": inline_b64,
+            "data_assets": resolved_assets,
+            "csp_nonce": csp_nonce,
         }
-        return Template(_TEMPLATE).render(**ctx)
+        env = Environment(autoescape=select_autoescape(default=True))
+        return env.from_string(_TEMPLATE).render(**ctx)
 
-    # ── Summary KPIs ──────────────────────────────────────────────────────
+    def _build_payload(self) -> dict[str, Any]:
+        events_ctx = [self._event_ctx(e) for e in self.events]
+        gps_path = self._gps_path_data()
+        features_payload_df = self._features_for_payload()
+        features_payload = json.loads(features_payload_df.to_json(orient="records"))
+        telemetry_payload = json.loads(self._chart_telemetry().to_json())
+        return {
+            "events": events_ctx,
+            "gps_path": gps_path,
+            "features": features_payload,
+            "telemetry": telemetry_payload,
+        }
+
+    def _write_split_assets(
+        self,
+        output_path: Path,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        assets_dir = output_path.parent / f"{output_path.stem}_assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        asset_map = {
+            "events": assets_dir / "events.json",
+            "gps_path": assets_dir / "gps_path.json",
+            "features": assets_dir / "features.json",
+            "telemetry": assets_dir / "telemetry.json",
+        }
+        for key, asset_path in asset_map.items():
+            asset_path.write_text(json.dumps(payload[key], default=str), encoding="utf-8")
+        return {
+            key: str(path.relative_to(output_path.parent)).replace("\\", "/")
+            for key, path in asset_map.items()
+        }
+
+    def _downsample_for_report(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.telemetry_downsample <= 1:
+            return df.copy()
+        return df.iloc[:: self.telemetry_downsample, :].copy()
+
+    def _features_for_payload(self) -> pd.DataFrame:
+        selected_cols = [
+            col for col in self.feature_columns if col in self.report_df.columns
+        ]
+        required = {"timestamp_sec", "_elapsed", "gps_lat", "gps_lon"}
+        selected_cols = list(
+            dict.fromkeys(
+                [
+                    *selected_cols,
+                    *[col for col in required if col in self.report_df.columns],
+                ]
+            )
+        )
+        if not selected_cols:
+            selected_cols = [
+                col for col in DEFAULT_REPORT_FEATURE_COLUMNS if col in self.report_df.columns
+            ]
+        return self.report_df[selected_cols].copy()
+
+    # 鈹€鈹€ Summary KPIs 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _summary(self) -> dict[str, Any]:
         df = self.features_df
@@ -314,11 +425,11 @@ class ReportBuilder:
             "depth_pct": _fmt(depth_n / total * 100 if total else 0, 1) + "%",
         }
 
-    # ── Chart: Main Telemetry (Velocity, Pitch/Roll, Clearance) ─────────
+    # 鈹€鈹€ Chart: Main Telemetry (Velocity, Pitch/Roll, Clearance) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _chart_telemetry(self) -> go.Figure:
         """4-row synced chart: Severity, Velocity, Pitch/Roll, Min Clearance."""
-        df = self.features_df
+        df = self.report_df
         x = df["_elapsed"]
 
         if "severity_score" not in df.columns:
@@ -466,11 +577,11 @@ class ReportBuilder:
 
         return fig
 
-    # ── GPS path data for Leaflet map ─────────────────────────────────────
+    # 鈹€鈹€ GPS path data for Leaflet map 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _gps_path_data(self) -> list[list[float]]:
         """Return [[lat, lon], ...] for the tractor path polyline."""
-        df = self.features_df
+        df = self.report_df
         lat = pd.to_numeric(df.get("gps_lat"), errors="coerce")
         lon = pd.to_numeric(df.get("gps_lon"), errors="coerce")
         valid = lat.notna() & lon.notna()
@@ -481,7 +592,7 @@ class ReportBuilder:
             for la, lo in zip(lat[valid], lon[valid])
         ]
 
-    # ── Event context for template ────────────────────────────────────────
+    # 鈹€鈹€ Event context for template 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _event_ctx(self, ev: Event) -> dict[str, Any]:
         elapsed = ev.timestamp_sec - self._t0
@@ -576,14 +687,12 @@ class ReportBuilder:
         }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HTML Template — "Mission Control Cockpit" Layout
-# ═══════════════════════════════════════════════════════════════════════════════
-# Architectural Principles:
-#   1. Viewport Density — Single 1080p viewport, no scrolling
-#   2. Semantic Grounding — Leaflet dark map with path + event markers
-#   3. Cross-Dimensional Interactivity — Global state links all components
-#   4. MLOps Actionability — Triage buttons, clipboard payloads, toast
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# HTML Template 鈥?"Mission Control Cockpit" Layout
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Architectural Principles:
+#   1. Viewport Density 鈥?Single 1080p viewport, no scrolling
+#   2. Semantic Grounding 鈥?Leaflet dark map with path + event markers
+#   3. Cross-Dimensional Interactivity 鈥?Global state links all components
+#   4. MLOps Actionability 鈥?Triage buttons, clipboard payloads, toast
 
 _TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -591,13 +700,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }}</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com https://cdn.jsdelivr.net; font-src 'self' data: https://fonts.gstatic.com; script-src 'self' 'nonce-{{ csp_nonce }}' https://cdn.plot.ly https://unpkg.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; connect-src 'self' https://*.basemaps.cartocdn.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none';">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/glightbox/dist/css/glightbox.min.css" />
 <style>
-/* ══════ CSS Custom Properties ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 CSS Custom Properties 鈺愨晲鈺愨晲鈺愨晲 */
 :root{
   --bg:#060a13;--surface:#0d1321;--elevated:#162036;
   --glass:rgba(13,19,33,0.85);--border:rgba(0,229,255,0.12);
@@ -611,7 +721,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   --radius:8px;--tr:0.25s cubic-bezier(0.4,0,0.2,1);
 }
 
-/* ══════ Reset & Base ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Reset & Base 鈺愨晲鈺愨晲鈺愨晲 */
 *,*::before,*::after{box-sizing:border-box}
 body{
   background:
@@ -626,7 +736,7 @@ body{
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--elevated);border-radius:3px}
 
-/* ══════ Header ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Header 鈺愨晲鈺愨晲鈺愨晲 */
 .mc-hdr{
   height:60px;display:flex;align-items:center;justify-content:space-between;
   padding:0 24px;border-bottom:1px solid var(--border);
@@ -649,7 +759,7 @@ body{
 .dot-red{background:var(--red);box-shadow:0 0 8px var(--red)}
 .ev-status{font-family:var(--sans);font-size:0.75rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase}
 
-/* ══════ Split Layout ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Split Layout 鈺愨晲鈺愨晲鈺愨晲 */
 .split-container {
   display: flex;
   flex-direction: row;
@@ -682,7 +792,7 @@ body{
   flex-direction: column;
 }
 
-/* ══════ KPI Strip ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 KPI Strip 鈺愨晲鈺愨晲鈺愨晲 */
 .kpi-strip{
   display:flex;align-items:center;gap:16px;
   padding:12px 16px;border-bottom:1px solid var(--border);
@@ -697,7 +807,7 @@ body{
 .kpi-label{font-family:var(--sans);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--tx-mut);margin-bottom:1px}
 .kpi-val{font-family:var(--mono);font-size:1.2rem;font-weight:600;color:var(--tx);line-height:1.2}
 
-/* ══════ Panel Title ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Panel Title 鈺愨晲鈺愨晲鈺愨晲 */
 .panel-title{
   font-family:var(--sans);font-size:0.7rem;text-transform:uppercase;
   letter-spacing:0.1em;color:var(--cyan);padding:8px 12px;
@@ -706,25 +816,25 @@ body{
 }
 .panel-title::before{content:'';display:inline-block;width:3px;height:10px;background:var(--cyan);border-radius:2px}
 
-/* ══════ Map Panel ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Map Panel 鈺愨晲鈺愨晲鈺愨晲 */
 .map-panel{
   border-right:1px solid var(--border);
 }
 .map-panel #map{background:var(--bg);width:100%;height:100%;}
 
-/* ══════ Charts Panel ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Charts Panel 鈺愨晲鈺愨晲鈺愨晲 */
 .charts-panel{
   border-right:1px solid var(--border);
 }
 .charts-panel #chart-telemetry{width:100%;height:100%;}
 
-/* ══════ Events Feed ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Events Feed 鈺愨晲鈺愨晲鈺愨晲 */
 .events-feed{
   display:flex;flex-direction:column;
 }
 .feed-scroll{padding:12px;display:flex;flex-direction:column;gap:12px;width:100%;}
 
-/* ── Responsive event card adaptations ── */
+/* 鈹€鈹€ Responsive event card adaptations 鈹€鈹€ */
 .events-feed.feed-narrow .evm-body{flex-direction:column}
 .events-feed.feed-narrow .evm-img{width:100%;max-width:100%}
 .events-feed.feed-narrow .met-mini{grid-template-columns:1fr}
@@ -735,7 +845,7 @@ body{
 .events-feed.feed-wide .evm-img{width:180px}
 .events-feed.feed-wide .met-mini{grid-template-columns:1fr 1fr 1fr}
 
-/* ══════ Filter Pills ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Filter Pills 鈺愨晲鈺愨晲鈺愨晲 */
 .filter-pills { display:flex; gap:4px; }
 .pill {
   background: var(--elevated);
@@ -751,7 +861,7 @@ body{
 .pill:hover { color: var(--tx); border-color: var(--cyan); }
 .pill.active { background: rgba(0,229,255,0.1); color: var(--cyan); border-color: var(--cyan); }
 
-/* ══════ Mini Event Cards ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Mini Event Cards 鈺愨晲鈺愨晲鈺愨晲 */
 .ev-card-mini{
   background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);overflow:hidden;transition:var(--tr);cursor:pointer;
@@ -797,7 +907,7 @@ body{
 }
 .evm-ai::before{content:'AI ';font-style:normal;font-weight:600;color:var(--green);font-size:0.6rem;letter-spacing:0.04em}
 
-/* ══════ Triage Buttons ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Triage Buttons 鈺愨晲鈺愨晲鈺愨晲 */
 .evm-triage{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--brd-lt)}
 .tri-btn{
   flex:1;border:1px solid var(--border);border-radius:4px;
@@ -814,7 +924,7 @@ body{
 .tri-fp.tri-selected{border-color:var(--red);color:var(--red);opacity:1;background:rgba(255,23,68,0.1)}
 .tri-rt.tri-selected{border-color:var(--amber);color:var(--amber);opacity:1;background:rgba(255,215,64,0.1)}
 
-/* ══════ Toast ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Toast 鈺愨晲鈺愨晲鈺愨晲 */
 .toast-popup{
   position:fixed;bottom:16px;right:16px;
   background:var(--elevated);border:1px solid var(--border);
@@ -825,7 +935,7 @@ body{
 }
 .toast-show{transform:translateY(0);opacity:1}
 
-/* ══════ Leaflet Overrides ══════ */
+/* 鈺愨晲鈺愨晲鈺愨晲 Leaflet Overrides 鈺愨晲鈺愨晲鈺愨晲 */
 .leaflet-container{background:var(--bg) !important;font-family:var(--mono) !important}
 .leaflet-control-zoom{display:none !important}
 .marker-tip{
@@ -848,7 +958,7 @@ body{
 </head>
 <body>
 
-<!-- ══════ HEADER ══════ -->
+<!-- 鈺愨晲鈺愨晲鈺愨晲 HEADER 鈺愨晲鈺愨晲鈺愨晲 -->
 <header class="mc-hdr">
   <div style="display:flex;align-items:center;gap:10px">
     <svg viewBox="0 0 32 32" width="32" height="32" fill="none" stroke="#00e5ff" stroke-width="1.5" stroke-linecap="round" style="filter:drop-shadow(0 0 6px rgba(0,229,255,0.3))">
@@ -874,7 +984,7 @@ body{
   <div class="mc-meta"><span>{{ run_id }}</span><span>{{ generated_at }}</span></div>
 </header>
 
-<!-- ── KPI Strip ── -->
+<!-- 鈹€鈹€ KPI Strip 鈹€鈹€ -->
 <section class="kpi-strip">
   <div class="kpi-cards">
     <div class="kpi"><div class="kpi-label">Frames</div><div class="kpi-val">{{ summary.frames }}</div></div>
@@ -893,10 +1003,10 @@ body{
   </div>
 </section>
 
-<!-- ══════ COCKPIT ══════ -->
+<!-- 鈺愨晲鈺愨晲鈺愨晲 COCKPIT 鈺愨晲鈺愨晲鈺愨晲 -->
 <div class="split-container" id="split-container">
 
-  <!-- ── Left: Map ── -->
+  <!-- 鈹€鈹€ Left: Map 鈹€鈹€ -->
   <section id="split-map" class="map-panel sticky-panel">
     <div class="panel-title">Mission Path</div>
     <div style="flex:1; min-height:0; min-width:0; position:relative;">
@@ -909,7 +1019,7 @@ body{
     </div>
   </section>
 
-  <!-- ── Middle: Charts ── -->
+  <!-- 鈹€鈹€ Middle: Charts 鈹€鈹€ -->
   <section id="split-charts" class="charts-panel sticky-panel">
     <div class="panel-title">Telemetry</div>
     <div style="flex:1; min-height:0; min-width:0; position:relative;">
@@ -917,7 +1027,7 @@ body{
     </div>
   </section>
 
-  <!-- ── Right: Events Feed ── -->
+  <!-- 鈹€鈹€ Right: Events Feed 鈹€鈹€ -->
   <section id="split-feed" class="events-feed scroll-panel">
     <div class="panel-title" style="justify-content:space-between;">
       <span>Events ({{ summary.events }})</span>
@@ -997,21 +1107,62 @@ body{
 <!-- Toast -->
 <div id="toast" class="toast-popup"></div>
 
-<!-- ══════ SCRIPTS ══════ -->
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.6.5/split.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/mcstudios/glightbox/dist/js/glightbox.min.js"></script>
-<script>
+<!-- 鈺愨晲鈺愨晲鈺愨晲 SCRIPTS 鈺愨晲鈺愨晲鈺愨晲 -->
+<script nonce="{{ csp_nonce }}" src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<script nonce="{{ csp_nonce }}" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script nonce="{{ csp_nonce }}" src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.6.5/split.min.js"></script>
+<script nonce="{{ csp_nonce }}" src="https://cdn.jsdelivr.net/gh/mcstudios/glightbox/dist/js/glightbox.min.js"></script>
+<script nonce="{{ csp_nonce }}">
 (function(){
-  /* ── Data ── */
+  /* Data */
   var RUN_ID = '{{ run_id }}';
-  var EVENTS = {{ events_json_str | safe }};
-  var GPS_PATH = {{ gps_path_json | safe }};
-  var FEATURES = {{ features_json | safe }};
+  var REPORT_MODE = '{{ report_mode }}';
+  var DATA_INLINE = {{ data_inline | tojson }};
+  var DATA_ASSETS = {{ data_assets | tojson }};
   var cfg = {responsive:true, displayModeBar:false, scrollZoom:true};
 
-  /* ── Split.js Layout ── */
+  function decodeInlinePayload() {
+    return {
+      events: JSON.parse(atob(DATA_INLINE.events || 'W10=')),
+      gps_path: JSON.parse(atob(DATA_INLINE.gps_path || 'W10=')),
+      features: JSON.parse(atob(DATA_INLINE.features || 'W10=')),
+      telemetry: JSON.parse(atob(DATA_INLINE.telemetry || 'eyJkYXRhIjpbXSwibGF5b3V0Ijp7fX0='))
+    };
+  }
+
+  function loadJsonAsset(path) {
+    return fetch(path, {cache: 'no-store'}).then(function(resp){
+      if (!resp.ok) {
+        throw new Error('Asset load failed: ' + path + ' (' + resp.status + ')');
+      }
+      return resp.json();
+    });
+  }
+
+  function loadPayload() {
+    if (REPORT_MODE === 'single') {
+      return Promise.resolve(decodeInlinePayload());
+    }
+    return Promise.all([
+      loadJsonAsset(DATA_ASSETS.events),
+      loadJsonAsset(DATA_ASSETS.gps_path),
+      loadJsonAsset(DATA_ASSETS.features),
+      loadJsonAsset(DATA_ASSETS.telemetry)
+    ]).then(function(items){
+      return {
+        events: items[0],
+        gps_path: items[1],
+        features: items[2],
+        telemetry: items[3]
+      };
+    });
+  }
+
+  loadPayload().then(function(payload){
+  var EVENTS = payload.events || [];
+  var GPS_PATH = payload.gps_path || [];
+  var FEATURES = payload.features || [];
+  /* 鈹€鈹€ Split.js Layout 鈹€鈹€ */
   var sizes = sessionStorage.getItem('split-sizes');
   if (sizes) sizes = JSON.parse(sizes);
   else sizes = [30, 40, 30];
@@ -1028,7 +1179,7 @@ body{
     }
   });
 
-  /* ── Lightbox ── */
+  /* 鈹€鈹€ Lightbox 鈹€鈹€ */
   var lightbox = GLightbox({
     selector: '.glightbox',
     touchNavigation: true,
@@ -1036,18 +1187,18 @@ body{
     zoomable: true
   });
 
-  /* ── Plotly: Main Chart ── */
-  var telData = {{ telemetry_json | safe }};
+  /* 鈹€鈹€ Plotly: Main Chart 鈹€鈹€ */
+  var telData = payload.telemetry || {data: [], layout: {}};
   var telEl = document.getElementById('chart-telemetry');
   Plotly.newPlot(telEl, telData.data, telData.layout, cfg);
 
-  /* ── Leaflet Map ── */
+  /* 鈹€鈹€ Leaflet Map 鈹€鈹€ */
   var mapEl = document.getElementById('map');
   var lmap = null;
   var pathLine = null;
   var markers = {};
 
-  /* ── Auto-resize chart to fill container ── */
+  /* 鈹€鈹€ Auto-resize chart to fill container 鈹€鈹€ */
   var resizeTimeout;
   function resizeCharts(){
     if(resizeTimeout) cancelAnimationFrame(resizeTimeout);
@@ -1062,7 +1213,7 @@ body{
   setTimeout(resizeCharts, 150);
   window.addEventListener('resize', resizeCharts);
 
-  /* ── Dynamic Zoom Adjustment ── */
+  /* 鈹€鈹€ Dynamic Zoom Adjustment 鈹€鈹€ */
   var lastChartScale = 1;
   var lastFeedClass = '';
   var ro = new ResizeObserver(function(entries) {
@@ -1097,6 +1248,34 @@ body{
   ro.observe(document.getElementById('split-charts'));
   ro.observe(document.getElementById('split-feed'));
 
+  var EVENT_TIMES = EVENTS.map(function(ev){ return parseFloat(ev.elapsed); });
+  var FEATURE_TIMES = FEATURES.map(function(row){ return parseFloat(row._elapsed); });
+
+  function nearestIndex(times, target) {
+    if (!times || times.length === 0) return -1;
+    var lo = 0;
+    var hi = times.length - 1;
+    while (lo < hi) {
+      var mid = Math.floor((lo + hi) / 2);
+      if (times[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0) return 0;
+    var prev = lo - 1;
+    return Math.abs(times[lo] - target) < Math.abs(times[prev] - target) ? lo : prev;
+  }
+
+  function lowerBound(times, target) {
+    var lo = 0;
+    var hi = times.length;
+    while (lo < hi) {
+      var mid = Math.floor((lo + hi) / 2);
+      if (times[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
   if(GPS_PATH.length > 0){
     lmap = L.map(mapEl, {zoomControl:false, attributionControl:false});
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
@@ -1127,7 +1306,7 @@ body{
     mapEl.innerHTML = '<div class="no-gps">No GPS Data Available</div>';
   }
 
-  /* ── Dashboard State (Cross-Dimensional Interactivity) ── */
+  /* 鈹€鈹€ Dashboard State (Cross-Dimensional Interactivity) 鈹€鈹€ */
   var DS = {
     hoverIdx: null,
     selectedEventId: null,
@@ -1201,7 +1380,7 @@ body{
     }
   };
 
-  /* ── Event Card Hover → Chart + Map sync ── */
+  /* 鈹€鈹€ Event Card Hover 鈫?Chart + Map sync 鈹€鈹€ */
   document.querySelectorAll('.ev-card-mini').forEach(function(card, idx){
     card.addEventListener('mouseenter',function(){DS.hover(idx)});
     card.addEventListener('mouseleave',function(){DS.clearHover()});
@@ -1211,19 +1390,17 @@ body{
     });
   });
 
-  /* ── Chart Click → Find Nearest Event ── */
+  /* 鈹€鈹€ Chart Click 鈫?Find Nearest Event 鈹€鈹€ */
   telEl.on('plotly_click',function(d){
     if(!d||!d.points||!d.points[0]) return;
     var clickX = d.points[0].x;
-    var nearest = -1, minDist = Infinity;
-    EVENTS.forEach(function(ev,idx){
-      var dist = Math.abs(parseFloat(ev.elapsed)-clickX);
-      if(dist<minDist && dist<3.0){minDist=dist;nearest=idx}
-    });
-    if(nearest>=0) DS.select(nearest);
+    var nearest = nearestIndex(EVENT_TIMES, clickX);
+    if(nearest >= 0 && Math.abs(EVENT_TIMES[nearest] - clickX) < 3.0) {
+      DS.select(nearest);
+    }
   });
 
-  /* ── Global Time Scrubbing ── */
+  /* 鈹€鈹€ Global Time Scrubbing 鈹€鈹€ */
   var playheadInput = document.getElementById('playhead');
   var playheadTime = document.getElementById('playhead-time');
   if (FEATURES.length > 0) {
@@ -1252,11 +1429,10 @@ body{
     });
     Plotly.relayout(telEl, {shapes: shapes});
 
-    var nearestRow = FEATURES.reduce(function(prev, curr) {
-      return (Math.abs(curr._elapsed - t) < Math.abs(prev._elapsed - t) ? curr : prev);
-    });
+    var nearestFeatureIdx = nearestIndex(FEATURE_TIMES, t);
+    var nearestRow = nearestFeatureIdx >= 0 ? FEATURES[nearestFeatureIdx] : null;
 
-    if (nearestRow.gps_lat != null && nearestRow.gps_lon != null && lmap) {
+    if (nearestRow && nearestRow.gps_lat != null && nearestRow.gps_lon != null && lmap) {
       if (!currentFrameMarker) {
         currentFrameMarker = L.circleMarker([nearestRow.gps_lat, nearestRow.gps_lon], {
           radius: 6, color: '#00e5ff', fillColor: '#00e5ff', fillOpacity: 1, weight: 2
@@ -1267,16 +1443,15 @@ body{
     }
 
     if (EVENTS.length > 0) {
-      var nearestEv = EVENTS.reduce(function(prev, curr) {
-        return (Math.abs(parseFloat(curr.elapsed) - t) < Math.abs(parseFloat(prev.elapsed) - t) ? curr : prev);
-      });
-      if (currentFrameImg) {
+      var nearestEventIdx = nearestIndex(EVENT_TIMES, t);
+      var nearestEv = nearestEventIdx >= 0 ? EVENTS[nearestEventIdx] : null;
+      if (currentFrameImg && nearestEv) {
         currentFrameImg.src = nearestEv.primary_image;
       }
     }
   });
 
-  /* ── Keyboard Navigation ── */
+  /* 鈹€鈹€ Keyboard Navigation 鈹€鈹€ */
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
       DS.clearSelection();
@@ -1300,7 +1475,7 @@ body{
     }
   });
 
-  /* ── Event Filtering ── */
+  /* 鈹€鈹€ Event Filtering 鈹€鈹€ */
   var filterPills = document.querySelectorAll('.pill');
   filterPills.forEach(function(pill) {
     pill.addEventListener('click', function() {
@@ -1343,7 +1518,7 @@ body{
     });
   });
 
-  /* ── Triage (MLOps Actionability) ── */
+  /* 鈹€鈹€ Triage (MLOps Actionability) 鈹€鈹€ */
   window.triageEvent = function(idx, action, btn){
     var ev = EVENTS[idx];
     if(!ev) return;
@@ -1379,7 +1554,7 @@ body{
     console.log('Triage payload:', txt);
   };
 
-  /* ── CSV Export ── */
+  /* 鈹€鈹€ CSV Export 鈹€鈹€ */
   window.downloadCSV = function(idx) {
     var ev = EVENTS[idx];
     var t = parseFloat(ev.elapsed);
@@ -1387,16 +1562,17 @@ body{
     var t_end = t + 2.5;
 
     var csvRows = ['timestamp_ms,channel_name,value'];
-    FEATURES.forEach(function(row) {
-      if (row._elapsed >= t_start && row._elapsed <= t_end) {
-        var ts_ms = Math.round(row.timestamp_sec * 1000);
-        ['velocity_mps', 'pitch', 'roll', 'min_clearance_m', 'roughness', 'yaw_rate', 'imu_correlation', 'pose_confidence'].forEach(function(ch) {
-          if (row[ch] != null) {
-            csvRows.push(ts_ms + ',' + ch + ',' + row[ch]);
-          }
-        });
-      }
-    });
+    var startIdx = lowerBound(FEATURE_TIMES, t_start);
+    var endIdx = lowerBound(FEATURE_TIMES, t_end + 1e-9);
+    for (var i = startIdx; i < endIdx; i++) {
+      var row = FEATURES[i];
+      var ts_ms = Math.round(row.timestamp_sec * 1000);
+      ['velocity_mps', 'pitch', 'roll', 'min_clearance_m', 'roughness', 'yaw_rate', 'imu_correlation', 'pose_confidence'].forEach(function(ch) {
+        if (row[ch] != null) {
+          csvRows.push(ts_ms + ',' + ch + ',' + row[ch]);
+        }
+      });
+    }
 
     var blob = new Blob([csvRows.join('\n')], {type: 'text/csv'});
     var url = window.URL.createObjectURL(blob);
@@ -1415,8 +1591,12 @@ body{
     clearTimeout(t._timer);
     t._timer = setTimeout(function(){t.classList.remove('toast-show')},3000);
   }
+  }).catch(function(err){
+    console.error('Dashboard payload initialization failed:', err);
+  });
 })();
 </script>
 </body>
 </html>
 """
+

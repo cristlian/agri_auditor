@@ -202,6 +202,24 @@ def test_gps_lat_lon_numeric(features_df: pd.DataFrame) -> None:
         assert vals.dtype == np.float64 or np.issubdtype(vals.dtype, np.floating)
 
 
+def test_depth_feature_cache_reuses_results(
+    loader: LogLoader,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    features = loader.load_manifest()
+    frame_idx = int(features.loc[features["has_depth"].astype(bool), "frame_idx"].iloc[0])
+    engine = FeatureEngine(loader=loader, depth_workers=1, depth_cache_dir=tmp_path)
+    first = engine._compute_frame_depth_features(frame_idx, True)
+
+    def _fail_open(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Depth image should not be reopened when cache is warm.")
+
+    monkeypatch.setattr("agri_auditor.features.Image.open", _fail_open)
+    second = engine._compute_frame_depth_features(frame_idx, True)
+    assert np.allclose(np.array(first), np.array(second), equal_nan=True)
+
+
 def _count_valid_depth_frames(loader: LogLoader, df: pd.DataFrame) -> int:
     count = 0
     for frame_idx in df.loc[df["has_depth"].astype(bool), "frame_idx"]:

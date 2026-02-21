@@ -25,9 +25,13 @@ def resolve_log_format(requested: str, stream: TextIO | None = None) -> str:
 
 def configure_logging(log_level: str, log_format: str, stream: TextIO | None = None) -> str:
     effective_format = resolve_log_format(log_format, stream=stream)
-    numeric_level = logging.getLevelName(log_level.upper())
-    if not isinstance(numeric_level, int):
-        raise ValueError(f"Invalid log level '{log_level}'.")
+    raw_level = str(log_level).strip()
+    if raw_level.isdigit():
+        numeric_level = int(raw_level)
+    else:
+        numeric_level = logging.getLevelName(raw_level.upper())
+        if not isinstance(numeric_level, int):
+            raise ValueError(f"Invalid log level '{log_level}'.")
 
     logging.basicConfig(level=numeric_level, format="%(message)s", force=True)
 

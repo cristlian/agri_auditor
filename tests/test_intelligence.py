@@ -6,6 +6,8 @@ from dataclasses import asdict
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 import uuid
 
 import numpy as np
@@ -118,6 +120,25 @@ def test_score_dataframe_includes_proximity_signal_in_severity() -> None:
     assert np.isfinite(severity).all()
     assert float(proximity.iloc[1]) > float(proximity.iloc[0])
     assert float(severity.iloc[1]) > float(severity.iloc[0])
+
+
+def test_robust_normalization_improves_non_outlier_resolution() -> None:
+    base_df = pd.DataFrame(
+        {
+            "frame_idx": [0, 1, 2, 3, 4],
+            "timestamp_sec": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "roughness": [0.9, 1.0, 1.1, 1.0, 1000.0],
+            "yaw_rate": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "imu_correlation": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "pose_confidence": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "min_clearance_m": [4.0, 4.0, 4.0, 4.0, 4.0],
+        }
+    )
+    minmax = EventDetector(normalization_mode="minmax").score_dataframe(base_df)
+    robust = EventDetector(normalization_mode="robust").score_dataframe(base_df)
+    minmax_core = float(pd.to_numeric(minmax.iloc[:4]["severity_score"], errors="coerce").mean())
+    robust_core = float(pd.to_numeric(robust.iloc[:4]["severity_score"], errors="coerce").mean())
+    assert robust_core > minmax_core
 
 
 def test_stationary_imu_nan_maps_to_safe_fault() -> None:
@@ -288,6 +309,152 @@ def test_gemini_analyst_returns_unavailable_on_api_error(
     assert result.error is not None
     assert "sdk_error=SDK outage" in result.error
     assert "rest_error=REST outage" in result.error
+
+
+def test_gemini_analyst_cache_hit_skips_remote_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    image_path = sample_image_path()
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        cache_dir=tmp_path,
+        retries=0,
+        backoff_ms=0,
+    )
+    calls = {"sdk": 0}
+
+    def fake_sdk(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        calls["sdk"] += 1
+        return GeminiAnalysisResult(
+            caption="Compact cacheable caption.",
+            model=model,
+            source="sdk",
+            latency_ms=88.0,
+        )
+
+    def fake_rest(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        raise AssertionError("REST fallback should not run for cached success path.")
+
+    monkeypatch.setattr(analyst, "_analyze_with_sdk", fake_sdk)
+    monkeypatch.setattr(analyst, "_analyze_with_rest", fake_rest)
+
+    first = analyst.analyze_image(image_path=image_path)
+    second = analyst.analyze_image(image_path=image_path)
+
+    assert first.source == "sdk"
+    assert second.source == "cache"
+    assert calls["sdk"] == 1
+
+
+def test_gemini_analyst_retries_then_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    image_path = sample_image_path()
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        retries=2,
+        backoff_ms=0,
+    )
+    rest_calls = {"count": 0}
+
+    def fake_sdk(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        raise RuntimeError("SDK unavailable")
+
+    def fake_rest(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        rest_calls["count"] += 1
+        if rest_calls["count"] < 2:
+            raise RuntimeError("REST transient outage")
+        return GeminiAnalysisResult(
+            caption="Recovered after retry.",
+            model=model,
+            source="rest",
+            latency_ms=123.0,
+        )
+
+    monkeypatch.setattr(analyst, "_analyze_with_sdk", fake_sdk)
+    monkeypatch.setattr(analyst, "_analyze_with_rest", fake_rest)
+    result = analyst.analyze_image(image_path=image_path)
+    assert result.source == "rest"
+    assert rest_calls["count"] == 2
+
+
+def test_gemini_analyst_circuit_breaker_opens_after_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    image_path = sample_image_path()
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        retries=0,
+        backoff_ms=0,
+        circuit_failure_threshold=1,
+        circuit_cooldown_sec=60.0,
+    )
+    provider_calls = {"count": 0}
+
+    def fake_sdk(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        provider_calls["count"] += 1
+        raise RuntimeError("SDK hard outage")
+
+    def fake_rest(*, image_bytes: bytes, mime_type: str, model: str) -> GeminiAnalysisResult:
+        provider_calls["count"] += 1
+        raise RuntimeError("REST hard outage")
+
+    monkeypatch.setattr(analyst, "_analyze_with_sdk", fake_sdk)
+    monkeypatch.setattr(analyst, "_analyze_with_rest", fake_rest)
+
+    first = analyst.analyze_image(image_path=image_path)
+    second = analyst.analyze_image(image_path=image_path)
+
+    assert first.source == "unavailable"
+    assert second.source == "unavailable"
+    assert second.error is not None and "circuit breaker open" in second.error
+    assert provider_calls["count"] == 2
+
+
+def test_orchestrator_parallel_analysis_uses_concurrency(
+    loader: LogLoader,
+) -> None:
+    class _TrackingAnalyst:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self._lock = threading.Lock()
+
+        def analyze_image(
+            self,
+            image_path: Path,
+            model: str | None = None,
+        ) -> GeminiAnalysisResult:
+            with self._lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.02)
+            with self._lock:
+                self.active -= 1
+            return GeminiAnalysisResult(
+                caption="parallel",
+                model=model,
+                source="sdk",
+                latency_ms=10.0,
+            )
+
+    analyst = _TrackingAnalyst()
+    orchestrator = IntelligenceOrchestrator(
+        loader=loader,
+        analyst=analyst,
+        gemini_workers=4,
+    )
+    image = sample_image_path()
+    results = orchestrator._batch_analyze_event_frames(
+        image_paths=[image, image, image, image],
+        model="gemini-3-flash-preview",
+    )
+    assert len(results) == 4
+    assert analyst.max_active >= 2
 
 
 def test_orchestrator_handles_recoverable_analyst_runtime_error(

@@ -13,7 +13,6 @@ from .intelligence import (
     GeminiConfigError,
     IntelligenceOrchestrator,
 )
-from .reporting import ReportBuilder
 
 __all__ = [
     "ALL_CAMERAS",
@@ -31,3 +30,16 @@ __all__ = [
     "RuntimeConfig",
     "load_runtime_config",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "ReportBuilder":
+        try:
+            from .reporting import ReportBuilder as _ReportBuilder
+        except ImportError as exc:
+            raise ImportError(
+                "ReportBuilder requires report dependencies. "
+                "Install with: pip install agri-auditor[report]"
+            ) from exc
+        return _ReportBuilder
+    raise AttributeError(name)
