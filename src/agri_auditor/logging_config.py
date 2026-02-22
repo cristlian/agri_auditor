@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import sys
 from typing import Any, TextIO
 
+_structlog: Any
 try:
-    import structlog as _structlog
+    _structlog = importlib.import_module("structlog")
 except ModuleNotFoundError:  # pragma: no cover - depends on environment setup
     _structlog = None
 
