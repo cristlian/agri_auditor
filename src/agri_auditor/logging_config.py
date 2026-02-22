@@ -5,9 +5,11 @@ import sys
 from typing import Any, TextIO
 
 try:
-    import structlog
+    import structlog as _structlog
 except ModuleNotFoundError:  # pragma: no cover - depends on environment setup
-    structlog = None
+    _structlog = None
+
+structlog: Any = _structlog
 
 
 def resolve_log_format(requested: str, stream: TextIO | None = None) -> str:

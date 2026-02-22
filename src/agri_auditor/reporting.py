@@ -207,16 +207,17 @@ def _encode_image_b64(
         return None
     try:
         with Image.open(path) as img:
-            if img.width > max_width:
-                ratio = max_width / img.width
+            rendered: Image.Image = img.copy()
+            if rendered.width > max_width:
+                ratio = max_width / rendered.width
                 resample = Image.Resampling.LANCZOS
-                img = img.resize(
-                    (max_width, int(img.height * ratio)), resample
+                rendered = rendered.resize(
+                    (max_width, int(rendered.height * ratio)), resample
                 )
-            if img.mode != "RGB":
-                img = img.convert("RGB")
+            if rendered.mode != "RGB":
+                rendered = rendered.convert("RGB")
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            rendered.save(buf, format="JPEG", quality=quality, optimize=True)
             return "data:image/jpeg;base64," + base64.b64encode(
                 buf.getvalue()
             ).decode("ascii")

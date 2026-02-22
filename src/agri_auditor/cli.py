@@ -213,8 +213,24 @@ def _load_events_from_json(json_path: Path) -> list[Event]:
             continue
         camera_paths = item.get("camera_paths", {})
         if not camera_paths and "image_path" in item:
-            camera_name = item.get("camera_name", item.get("primary_camera", DEFAULT_CAMERA))
+            camera_name_raw = item.get(
+                "camera_name", item.get("primary_camera", DEFAULT_CAMERA)
+            )
+            camera_name = (
+                str(camera_name_raw).strip() if camera_name_raw is not None else ""
+            )
+            if not camera_name:
+                camera_name = DEFAULT_CAMERA
             camera_paths = {camera_name: item["image_path"]}
+
+        primary_camera_raw = item.get(
+            "primary_camera", item.get("camera_name", DEFAULT_CAMERA)
+        )
+        primary_camera = (
+            str(primary_camera_raw).strip() if primary_camera_raw is not None else ""
+        )
+        if not primary_camera:
+            primary_camera = DEFAULT_CAMERA
 
         events.append(
             Event(
@@ -236,9 +252,7 @@ def _load_events_from_json(json_path: Path) -> list[Event]:
                 event_type=item.get("event_type", "mixed"),
                 gps_lat=item.get("gps_lat"),
                 gps_lon=item.get("gps_lon"),
-                primary_camera=item.get(
-                    "primary_camera", item.get("camera_name", DEFAULT_CAMERA)
-                ),
+                primary_camera=primary_camera,
                 camera_paths=camera_paths if isinstance(camera_paths, dict) else {},
                 gemini_caption=item.get("gemini_caption", UNAVAILABLE_CAPTION),
                 gemini_model=item.get("gemini_model"),
