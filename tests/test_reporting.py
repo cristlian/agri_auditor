@@ -13,7 +13,6 @@ import pytest
 from agri_auditor.intelligence import Event, UNAVAILABLE_CAPTION
 from agri_auditor.reporting import (
     COLORS,
-    EVENT_TYPE_COLORS,
     SEVERITY_WARNING_THRESHOLD,
     SEVERITY_CRITICAL_THRESHOLD,
     CHART_TELEMETRY_HEIGHT,
@@ -25,6 +24,7 @@ from agri_auditor.reporting import (
     _severity_label,
     _elapsed,
     _PLACEHOLDER_IMAGE,
+    sanitize_model_text,
 )
 
 
@@ -346,9 +346,15 @@ class TestReportBuilder:
     def test_render_includes_csp_and_safe_data_loader(self, builder):
         html = builder._render()
         assert "Content-Security-Policy" in html
-        assert "DATA_INLINE" in html
+        assert 'id="payload-events"' in html
+        assert 'id="payload-gps-path"' in html
+        assert 'id="payload-features"' in html
+        assert 'id="payload-telemetry"' in html
         assert "events_json_str" not in html
         assert "telemetry_json | safe" not in html
+        assert "parseJsonScript('payload-events'" in html
+        assert "DATA_INLINE" not in html
+        assert "decodeInlineValue" not in html
         assert "function nearestIndex" in html
         assert "FEATURES.reduce" not in html
 
@@ -392,6 +398,54 @@ class TestReportBuilder:
         assert '<script>alert("xss")</script>' not in html
         assert "&lt;script&gt;" in html
 
+    def test_render_script_break_payload_is_inert(self):
+        events = _make_events(1)
+        ev = events[0]
+        events[0] = Event(
+            event_rank=ev.event_rank,
+            frame_idx=ev.frame_idx,
+            timestamp_sec=ev.timestamp_sec,
+            timestamp_iso_utc=ev.timestamp_iso_utc,
+            severity_score=ev.severity_score,
+            roughness=ev.roughness,
+            min_clearance_m=ev.min_clearance_m,
+            yaw_rate=ev.yaw_rate,
+            imu_correlation=ev.imu_correlation,
+            pose_confidence=ev.pose_confidence,
+            roughness_norm=ev.roughness_norm,
+            proximity_norm=ev.proximity_norm,
+            yaw_rate_norm=ev.yaw_rate_norm,
+            imu_fault_norm=ev.imu_fault_norm,
+            localization_fault_norm=ev.localization_fault_norm,
+            event_type=ev.event_type,
+            gps_lat=ev.gps_lat,
+            gps_lon=ev.gps_lon,
+            primary_camera=ev.primary_camera,
+            camera_paths=ev.camera_paths,
+            gemini_caption="</script><script>alert(1)</script>",
+            gemini_model=ev.gemini_model,
+            gemini_source="sdk",
+            gemini_latency_ms=ev.gemini_latency_ms,
+        )
+        builder = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=events,
+            metadata={"run_id": "script-break-test"},
+            include_surround=False,
+        )
+        html = builder._render()
+        assert "</script><script>alert(1)</script>" not in html
+        assert (
+            "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in html
+            or "\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e"
+            in html
+        )
+
+    def test_sanitize_model_text_strips_controls_and_normalizes_whitespace(self):
+        raw = "  hello\x00\t\tworld \x1f\n\n\nnext\rline  "
+        assert sanitize_model_text(raw) == "hello world\n\nnextline"
+
     def test_split_mode_writes_asset_files(self):
         builder = ReportBuilder(
             loader=_mock_loader(),
@@ -408,6 +462,35 @@ class TestReportBuilder:
         assert assets_dir.exists()
         for filename in ("events.json", "gps_path.json", "features.json", "telemetry.json"):
             assert (assets_dir / filename).exists()
+        images_dir = assets_dir / "images"
+        assert images_dir.exists()
+        assert any(images_dir.iterdir())
+        content = out.read_text(encoding="utf-8")
+        assert 'id="payload-events"' in content
+        assert "applyEventImages(EVENTS);" in content
+        assert 'src="data:image' not in content
+
+    def test_split_html_is_smaller_than_single_html(self):
+        single = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=_make_events(),
+            metadata={"run_id": "single-size-test"},
+            include_surround=False,
+            report_mode="single",
+        )
+        split = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=_make_events(),
+            metadata={"run_id": "split-size-test"},
+            include_surround=False,
+            report_mode="split",
+        )
+        tmpdir = _new_workspace_tmp_dir()
+        single_out = single.save_report(tmpdir / "single_report.html")
+        split_out = split.save_report(tmpdir / "split_report.html")
+        assert split_out.stat().st_size < single_out.stat().st_size
 
     def test_telemetry_downsample_reduces_feature_payload_rows(self):
         full = ReportBuilder(
@@ -448,7 +531,7 @@ class TestReportBuilderWithRealData:
 
     @pytest.fixture
     def real_events(self, real_loader, real_features):
-        from agri_auditor import EventDetector, IntelligenceOrchestrator
+        from agri_auditor import IntelligenceOrchestrator
         orch = IntelligenceOrchestrator(loader=real_loader, analyst=None)
         return orch.build_events(features_df=real_features, top_k=5)
 

@@ -381,6 +381,107 @@ def test_gemini_analyst_retries_then_recovers(
     assert rest_calls["count"] == 2
 
 
+def test_gemini_analyst_retry_backoff_applies_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    image_path = sample_image_path()
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        retries=2,
+        backoff_ms=100,
+        jitter_ratio=0.2,
+    )
+    calls = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def fake_analyze_once(
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        model: str,
+    ) -> GeminiAnalysisResult:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("REST HTTP 429: quota")
+        if calls["count"] == 2:
+            raise RuntimeError("REST HTTP 500: transient")
+        return GeminiAnalysisResult(
+            caption="Recovered after jitter retries.",
+            model=model,
+            source="rest",
+            latency_ms=123.0,
+        )
+
+    monkeypatch.setattr(analyst, "_analyze_once", fake_analyze_once)
+    monkeypatch.setattr("agri_auditor.intelligence.time.sleep", sleep_calls.append)
+    monkeypatch.setattr("agri_auditor.intelligence.random.uniform", lambda a, b: 0.1)
+
+    result = analyst.analyze_image(image_path=image_path)
+    assert result.source == "rest"
+    assert calls["count"] == 3
+    assert len(sleep_calls) == 2
+    assert sleep_calls[0] == pytest.approx(0.11, rel=1e-3)
+    assert sleep_calls[1] == pytest.approx(0.22, rel=1e-3)
+
+
+def test_gemini_sdk_timeout_wrapper_enforces_per_call_sla(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        timeout_sec=0.01,
+        retries=0,
+        backoff_ms=0,
+    )
+
+    class _SlowModels:
+        def generate_content(self, **kwargs: object) -> object:
+            time.sleep(0.05)
+            return {"text": "late response"}
+
+    class _FakeClient:
+        models = _SlowModels()
+
+    with pytest.raises(TimeoutError, match="per-call SLA"):
+        analyst._call_sdk_with_timeout(
+            _FakeClient(),
+            model="gemini-3-flash-preview",
+            contents=[],
+            config={},
+        )
+
+
+def test_gemini_analyst_timeout_retries_then_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    image_path = sample_image_path()
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        retries=2,
+        backoff_ms=0,
+    )
+    calls = {"count": 0}
+
+    def fake_analyze_once(
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        model: str,
+    ) -> GeminiAnalysisResult:
+        calls["count"] += 1
+        raise TimeoutError("SDK timeout after 0.01s (per-call SLA).")
+
+    monkeypatch.setattr(analyst, "_analyze_once", fake_analyze_once)
+    result = analyst.analyze_image(image_path=image_path)
+    assert result.source == "unavailable"
+    assert calls["count"] == 3
+    assert result.error is not None
+    assert "attempt_3=SDK timeout" in result.error
+
+
 def test_gemini_analyst_circuit_breaker_opens_after_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

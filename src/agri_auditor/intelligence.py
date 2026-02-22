@@ -5,11 +5,16 @@ import hashlib
 import json
 import mimetypes
 import os
+import random
 import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +46,7 @@ DEFAULT_THINKING_LEVEL = "low"  # Minimizes latency for simple caption tasks
 DEFAULT_MAX_WORDS = 20
 DEFAULT_GEMINI_RETRIES = 2
 DEFAULT_GEMINI_BACKOFF_MS = 250
+DEFAULT_GEMINI_JITTER_RATIO = 0.2
 DEFAULT_GEMINI_CIRCUIT_FAILURES = 3
 DEFAULT_GEMINI_CIRCUIT_COOLDOWN_SEC = 30.0
 DEFAULT_GEMINI_WORKERS = 4
@@ -287,6 +293,7 @@ class EventDetector:
             if "imu_correlation" in scored_df.columns
             else pd.Series(np.nan, index=scored_df.index, dtype="float64")
         )
+        imu_corr_missing = imu_corr_raw.isna()
         imu_corr_raw = imu_corr_raw.fillna(1.0)
 
         pose_conf_raw = (
@@ -294,14 +301,18 @@ class EventDetector:
             if "pose_confidence" in scored_df.columns
             else pd.Series(np.nan, index=scored_df.index, dtype="float64")
         )
+        pose_conf_missing = pose_conf_raw.isna()
         pose_conf_raw = pose_conf_raw.fillna(100.0)
 
         roughness_norm = self._normalize(roughness_raw)
         yaw_rate_norm = self._normalize(yaw_rate_abs_raw)
         # Inverse semantics: lower IMU correlation means higher sensor-fault severity.
         imu_fault_norm = self._invert_normalize(imu_corr_raw)
+        # Preserve safe-value imputation semantics for missing health channels.
+        imu_fault_norm = imu_fault_norm.mask(imu_corr_missing, 0.0)
         # Inverse semantics: lower pose confidence means higher localization-fault severity.
         localization_fault_norm = self._invert_normalize(pose_conf_raw)
+        localization_fault_norm = localization_fault_norm.mask(pose_conf_missing, 0.0)
 
         severity_score = (
             self.roughness_weight * roughness_norm
@@ -486,13 +497,15 @@ class GeminiAnalyst:
         thinking_level: str = DEFAULT_THINKING_LEVEL,
         retries: int = DEFAULT_GEMINI_RETRIES,
         backoff_ms: int = DEFAULT_GEMINI_BACKOFF_MS,
+        jitter_ratio: float = DEFAULT_GEMINI_JITTER_RATIO,
         cache_dir: str | Path | None = None,
         circuit_failure_threshold: int = DEFAULT_GEMINI_CIRCUIT_FAILURES,
         circuit_cooldown_sec: float = DEFAULT_GEMINI_CIRCUIT_COOLDOWN_SEC,
     ) -> None:
         # Auto-load .env file for API key if present
         load_dotenv(override=False)
-        resolved_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        key_candidate = api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "")
+        resolved_key = str(key_candidate).strip()
         if not resolved_key:
             raise GeminiConfigError("GEMINI_API_KEY is required for GeminiAnalyst.")
         if timeout_sec <= 0:
@@ -503,6 +516,8 @@ class GeminiAnalyst:
             raise ValueError("retries must be >= 0.")
         if backoff_ms < 0:
             raise ValueError("backoff_ms must be >= 0.")
+        if jitter_ratio < 0:
+            raise ValueError("jitter_ratio must be >= 0.")
         if circuit_failure_threshold <= 0:
             raise ValueError("circuit_failure_threshold must be > 0.")
         if circuit_cooldown_sec < 0:
@@ -517,6 +532,7 @@ class GeminiAnalyst:
         self.thinking_level = str(thinking_level)
         self.retries = int(retries)
         self.backoff_ms = int(backoff_ms)
+        self.jitter_ratio = float(jitter_ratio)
         self.cache_dir = (
             Path(cache_dir).expanduser()
             if cache_dir is not None and str(cache_dir).strip()
@@ -596,7 +612,7 @@ class GeminiAnalyst:
                     and self._is_retryable_error(message)
                 )
                 if should_retry:
-                    backoff_sec = (self.backoff_ms / 1000.0) * (2 ** attempt_idx)
+                    backoff_sec = self._compute_backoff_seconds(attempt_idx)
                     if backoff_sec > 0:
                         time.sleep(backoff_sec)
                     continue
@@ -667,7 +683,7 @@ class GeminiAnalyst:
     ) -> GeminiAnalysisResult:
         start = time.perf_counter()
         try:
-            from google import genai  # type: ignore
+            from google import genai
         except ImportError as exc:
             raise RuntimeError("google-genai SDK is unavailable.") from exc
 
@@ -691,12 +707,17 @@ class GeminiAnalyst:
         if self._model_supports_thinking_level(model):
             config["thinking_config"] = {"thinking_level": self.thinking_level}
         try:
-            response = client.models.generate_content(
+            response = self._call_sdk_with_timeout(
+                client,
                 model=model,
                 contents=contents,
                 config=config,
             )
-        except (RuntimeError, ValueError, TypeError, TimeoutError, OSError) as exc:
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"SDK timeout after {self.timeout_sec:.2f}s (per-call SLA)."
+            ) from exc
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
             raise RuntimeError(f"SDK request failed: {exc}") from exc
         latency_ms = (time.perf_counter() - start) * 1000.0
 
@@ -715,6 +736,42 @@ class GeminiAnalyst:
             thinking_tokens=thinking_tokens,
             total_tokens=total_tokens,
         )
+
+    def _call_sdk_with_timeout(
+        self,
+        client: Any,
+        *,
+        model: str,
+        contents: list[dict[str, Any]],
+        config: dict[str, Any],
+    ) -> Any:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                client.models.generate_content,
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            try:
+                return future.result(timeout=self.timeout_sec)
+            except FuturesTimeoutError as exc:
+                future.cancel()
+                raise TimeoutError(
+                    f"SDK timeout after {self.timeout_sec:.2f}s (per-call SLA)."
+                ) from exc
+
+    def _compute_backoff_seconds(self, attempt_idx: int) -> float:
+        base_seconds = (self.backoff_ms / 1000.0) * (2 ** attempt_idx)
+        if base_seconds <= 0:
+            return 0.0
+        jitter_span = max(0.0, self.jitter_ratio)
+        jitter_factor = (
+            1.0 + random.uniform(-jitter_span, jitter_span)
+            if jitter_span > 0
+            else 1.0
+        )
+        jitter_factor = max(0.0, jitter_factor)
+        return max(0.0, base_seconds * jitter_factor)
 
     def _analyze_with_rest(
         self,
@@ -968,9 +1025,17 @@ class GeminiAnalyst:
         try:
             with self._cache_lock:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
+                serialized = json.dumps(payload)
                 tmp_path = cache_path.with_suffix(".tmp")
-                tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-                tmp_path.replace(cache_path)
+                tmp_path.write_text(serialized, encoding="utf-8")
+                try:
+                    tmp_path.replace(cache_path)
+                except OSError:
+                    cache_path.write_text(serialized, encoding="utf-8")
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         except OSError:
             return
 

@@ -17,8 +17,10 @@ Architectural Principles:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,6 +135,7 @@ _PLACEHOLDER_IMAGE = (
         b'font-family="monospace" font-size="14">No Image Available</text></svg>'
     ).decode("ascii")
 )
+MAX_MODEL_TEXT_LENGTH = 600
 
 
 # 鈹€鈹€ Utilities 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -168,6 +171,32 @@ def _fmt(value: Any, precision: int = 2, fallback: str = "N/A") -> str:
     return f"{f:.{precision}f}"
 
 
+def sanitize_model_text(value: str, max_length: int = MAX_MODEL_TEXT_LENGTH) -> str:
+    """Normalize Gemini text before HTML/template binding."""
+    filtered_chars: list[str] = []
+    for char in str(value):
+        codepoint = ord(char)
+        if char in {"\n", "\t"}:
+            filtered_chars.append(char)
+            continue
+        if (0 <= codepoint < 32) or codepoint == 127:
+            continue
+        filtered_chars.append(char)
+
+    filtered = "".join(filtered_chars)
+    normalized_lines = [
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in filtered.splitlines()
+    ]
+    normalized = "\n".join(normalized_lines)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    if max_length <= 0:
+        return ""
+    if len(normalized) > max_length:
+        return normalized[:max_length].rstrip()
+    return normalized
+
+
 def _encode_image_b64(
     image_path: str | Path,
     max_width: int = DEFAULT_IMAGE_MAX_WIDTH,
@@ -180,8 +209,9 @@ def _encode_image_b64(
         with Image.open(path) as img:
             if img.width > max_width:
                 ratio = max_width / img.width
+                resample = Image.Resampling.LANCZOS
                 img = img.resize(
-                    (max_width, int(img.height * ratio)), Image.LANCZOS
+                    (max_width, int(img.height * ratio)), resample
                 )
             if img.mode != "RGB":
                 img = img.convert("RGB")
@@ -319,13 +349,7 @@ class ReportBuilder:
     ) -> str:
         bundle = payload if payload is not None else self._build_payload()
         resolved_assets = asset_paths or {}
-        inline_b64: dict[str, str] = {}
-        if self.report_mode == "single":
-            for key, value in bundle.items():
-                encoded = json.dumps(value, separators=(",", ":"), default=str).encode(
-                    "utf-8"
-                )
-                inline_b64[key] = base64.b64encode(encoded).decode("ascii")
+        inline_payload = self._inline_payload_blocks(bundle)
 
         csp_nonce = secrets.token_urlsafe(18)
         ctx: dict[str, Any] = {
@@ -336,9 +360,15 @@ class ReportBuilder:
             ),
             "summary": self._summary(),
             "events": bundle["events"],
-            "report_mode": self.report_mode,
-            "data_inline": inline_b64,
-            "data_assets": resolved_assets,
+            "payload_meta": {
+                "run_id": self.metadata.get("run_id", "audit-run"),
+                "report_mode": self.report_mode,
+                "data_assets": resolved_assets,
+            },
+            "payload_events": inline_payload["events"],
+            "payload_gps_path": inline_payload["gps_path"],
+            "payload_features": inline_payload["features"],
+            "payload_telemetry": inline_payload["telemetry"],
             "csp_nonce": csp_nonce,
         }
         env = Environment(autoescape=select_autoescape(default=True))
@@ -357,6 +387,31 @@ class ReportBuilder:
             "telemetry": telemetry_payload,
         }
 
+    def _inline_payload_blocks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.report_mode != "split":
+            return payload
+        minimal_events = [
+            {
+                "rank": event.get("rank"),
+                "frame_idx": event.get("frame_idx"),
+                "elapsed": event.get("elapsed"),
+                "event_type": event.get("event_type"),
+                "severity": event.get("severity"),
+                "severity_label": event.get("severity_label"),
+                "severity_color": event.get("severity_color"),
+                "gps_lat": event.get("gps_lat"),
+                "gps_lon": event.get("gps_lon"),
+                "primary_image": event.get("primary_image"),
+            }
+            for event in payload.get("events", [])
+        ]
+        return {
+            "events": minimal_events,
+            "gps_path": [],
+            "features": [],
+            "telemetry": {"data": [], "layout": {}},
+        }
+
     def _write_split_assets(
         self,
         output_path: Path,
@@ -364,6 +419,11 @@ class ReportBuilder:
     ) -> dict[str, str]:
         assets_dir = output_path.parent / f"{output_path.stem}_assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
+        payload["events"] = self._materialize_event_image_assets(
+            payload.get("events", []),
+            assets_dir=assets_dir,
+            output_root=output_path.parent,
+        )
         asset_map = {
             "events": assets_dir / "events.json",
             "gps_path": assets_dir / "gps_path.json",
@@ -376,6 +436,88 @@ class ReportBuilder:
             key: str(path.relative_to(output_path.parent)).replace("\\", "/")
             for key, path in asset_map.items()
         }
+
+    def _materialize_event_image_assets(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        assets_dir: Path,
+        output_root: Path,
+    ) -> list[dict[str, Any]]:
+        images_dir = assets_dir / "images"
+        image_cache: dict[str, str] = {}
+        materialized: list[dict[str, Any]] = []
+        for event in events:
+            event_copy = dict(event)
+            event_copy["primary_image"] = self._materialize_single_image_asset(
+                event_copy.get("primary_image"),
+                images_dir=images_dir,
+                output_root=output_root,
+                image_cache=image_cache,
+            )
+            surround = event_copy.get("surround")
+            if isinstance(surround, dict):
+                event_copy["surround"] = {
+                    camera: self._materialize_single_image_asset(
+                        image_value,
+                        images_dir=images_dir,
+                        output_root=output_root,
+                        image_cache=image_cache,
+                    )
+                    for camera, image_value in surround.items()
+                }
+            materialized.append(event_copy)
+        return materialized
+
+    @staticmethod
+    def _materialize_single_image_asset(
+        image_value: Any,
+        *,
+        images_dir: Path,
+        output_root: Path,
+        image_cache: dict[str, str],
+    ) -> str:
+        if not isinstance(image_value, str) or not image_value:
+            return _PLACEHOLDER_IMAGE
+        if not image_value.startswith("data:image/"):
+            return image_value
+        if image_value in image_cache:
+            return image_cache[image_value]
+        try:
+            header, encoded = image_value.split(",", 1)
+        except ValueError:
+            return image_value
+        if ";base64" not in header:
+            return image_value
+        mime_token = header.split(";", 1)[0]
+        mime_type = mime_token.split(":", 1)[-1].lower()
+        extension = "bin"
+        if mime_type in {"image/jpeg", "image/jpg"}:
+            extension = "jpg"
+        elif mime_type == "image/png":
+            extension = "png"
+        elif mime_type == "image/svg+xml":
+            extension = "svg"
+
+        digest = hashlib.sha256(image_value.encode("utf-8")).hexdigest()[:24]
+        asset_path = images_dir / f"{digest}.{extension}"
+        if not asset_path.exists():
+            images_dir.mkdir(parents=True, exist_ok=True)
+            decoded = base64.b64decode(encoded.encode("ascii"))
+            tmp_path = asset_path.with_suffix(f"{asset_path.suffix}.tmp")
+            tmp_path.write_bytes(decoded)
+            try:
+                tmp_path.replace(asset_path)
+            except OSError:
+                asset_path.write_bytes(decoded)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        relative = str(asset_path.relative_to(output_root)).replace("\\", "/")
+        image_cache[image_value] = relative
+        return relative
 
     def _downsample_for_report(self, df: pd.DataFrame) -> pd.DataFrame:
         if self.telemetry_downsample <= 1:
@@ -642,9 +784,12 @@ class ReportBuilder:
                 ),
             },
         ]
+        sanitize_caption = sanitize_model_text(ev.gemini_caption)
+        if not sanitize_caption:
+            sanitize_caption = UNAVAILABLE_CAPTION
 
         has_ai = (
-            ev.gemini_caption != UNAVAILABLE_CAPTION
+            sanitize_caption != UNAVAILABLE_CAPTION
             and ev.gemini_source != "unavailable"
         )
 
@@ -673,7 +818,7 @@ class ReportBuilder:
             ),
             "signals": signals,
             "metrics": metrics,
-            "gemini_caption": ev.gemini_caption,
+            "gemini_caption": sanitize_caption,
             "gemini_model": ev.gemini_model,
             "gemini_source": ev.gemini_source,
             "gemini_latency_ms": ev.gemini_latency_ms,
@@ -1010,9 +1155,9 @@ body{
   <section id="split-map" class="map-panel sticky-panel">
     <div class="panel-title">Mission Path</div>
     <div style="flex:1; min-height:0; min-width:0; position:relative;">
-      <div id="map" style="position:absolute; top:0; left:0; right:0; bottom:0;">
-        <div id="map-overlay" style="position:absolute; bottom:10px; left:10px; z-index:1000; border:1px solid var(--border); border-radius:4px; background:var(--elevated); padding:4px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">
-          <img id="current-frame-img" src="{{ events[0].primary_image if events else '' }}" style="width:160px; height:auto; display:block; border-radius:2px;">
+        <div id="map" style="position:absolute; top:0; left:0; right:0; bottom:0;">
+          <div id="map-overlay" style="position:absolute; bottom:10px; left:10px; z-index:1000; border:1px solid var(--border); border-radius:4px; background:var(--elevated); padding:4px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">
+          <img id="current-frame-img" src="" style="width:160px; height:auto; display:block; border-radius:2px;">
           <div style="font-family:var(--mono); font-size:0.7rem; color:var(--tx-dim); text-align:center; margin-top:4px;">Nearest Event Frame</div>
         </div>
       </div>
@@ -1040,7 +1185,8 @@ body{
     </div>
     <div class="feed-scroll">
       {% for ev in events %}
-      <div class="ev-card-mini" id="event-{{ ev.rank }}" data-idx="{{ loop.index0 }}">
+      {% set event_idx = loop.index0 %}
+      <div class="ev-card-mini" id="event-{{ ev.rank }}" data-idx="{{ event_idx }}">
         <div class="evm-hdr">
           <span class="evm-rank">#{{ ev.rank }}</span>
           <span class="evm-badge" style="background:{{ ev.event_type_color }}">{{ ev.event_type_upper }}</span>
@@ -1053,7 +1199,7 @@ body{
         <div class="sev-track"><div class="sev-fill" style="width:{{ ev.severity_pct }}%;background:{{ ev.severity_color }}"></div></div>
         <div class="evm-body">
           <a href="#surround-{{ ev.rank }}" class="glightbox" data-gallery="gallery-{{ ev.rank }}" data-glightbox="width: 90vw; height: 90vh;">
-            <img src="{{ ev.primary_image }}" class="evm-img" alt="Event {{ ev.rank }}">
+            <img data-primary-image="1" data-event-idx="{{ event_idx }}" class="evm-img" alt="Event {{ ev.rank }}">
           </a>
           <div id="surround-{{ ev.rank }}" style="display:none;">
             <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:15px; padding:20px; background:var(--bg); width:90vw; height:90vh; overflow:auto;">
@@ -1064,13 +1210,13 @@ body{
                 {% for cam, img in ev.surround.items() %}
                 <div style="display:flex; flex-direction:column; align-items:center;">
                   <span style="font-family:var(--mono); font-size:0.85rem; color:var(--tx-dim); margin-bottom:4px;">{{ cam }}</span>
-                  <img src="{{ img }}" style="width:100%; border:1px solid var(--border); border-radius:4px;">
+                  <img data-event-idx="{{ event_idx }}" data-surround-camera="{{ cam }}" style="width:100%; border:1px solid var(--border); border-radius:4px;">
                 </div>
                 {% endfor %}
               {% endif %}
               <div style="display:flex; flex-direction:column; align-items:center;">
                 <span style="font-family:var(--mono); font-size:0.85rem; color:var(--cyan); margin-bottom:4px;">{{ ev.primary_camera }} (Primary)</span>
-                <img src="{{ ev.primary_image }}" style="width:100%; border:1px solid var(--cyan); border-radius:4px;">
+                <img data-primary-image="1" data-event-idx="{{ event_idx }}" style="width:100%; border:1px solid var(--cyan); border-radius:4px;">
               </div>
             </div>
           </div>
@@ -1093,10 +1239,10 @@ body{
         <div class="evm-ai">"{{ ev.gemini_caption }}"</div>
         {% endif %}
         <div class="evm-triage">
-          <button class="tri-btn tri-ok" onclick="triageEvent({{ loop.index0 }},'accurate',this)">&#10003; Accurate</button>
-          <button class="tri-btn tri-fp" onclick="triageEvent({{ loop.index0 }},'false_positive',this)">&#10007; False Positive</button>
-          <button class="tri-btn tri-rt" onclick="triageEvent({{ loop.index0 }},'retrain',this)">&#8635; Retrain</button>
-          <button class="tri-btn" onclick="downloadCSV({{ loop.index0 }})">&darr; CSV</button>
+          <button class="tri-btn tri-ok" onclick="triageEvent({{ event_idx }},'accurate',this)">&#10003; Accurate</button>
+          <button class="tri-btn tri-fp" onclick="triageEvent({{ event_idx }},'false_positive',this)">&#10007; False Positive</button>
+          <button class="tri-btn tri-rt" onclick="triageEvent({{ event_idx }},'retrain',this)">&#8635; Retrain</button>
+          <button class="tri-btn" onclick="downloadCSV({{ event_idx }})">&darr; CSV</button>
         </div>
       </div>
       {% endfor %}
@@ -1107,6 +1253,12 @@ body{
 <!-- Toast -->
 <div id="toast" class="toast-popup"></div>
 
+<script id="payload-meta" type="application/json">{{ payload_meta | tojson }}</script>
+<script id="payload-events" type="application/json">{{ payload_events | tojson }}</script>
+<script id="payload-gps-path" type="application/json">{{ payload_gps_path | tojson }}</script>
+<script id="payload-features" type="application/json">{{ payload_features | tojson }}</script>
+<script id="payload-telemetry" type="application/json">{{ payload_telemetry | tojson }}</script>
+
 <!-- 鈺愨晲鈺愨晲鈺愨晲 SCRIPTS 鈺愨晲鈺愨晲鈺愨晲 -->
 <script nonce="{{ csp_nonce }}" src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <script nonce="{{ csp_nonce }}" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
@@ -1114,54 +1266,133 @@ body{
 <script nonce="{{ csp_nonce }}" src="https://cdn.jsdelivr.net/gh/mcstudios/glightbox/dist/js/glightbox.min.js"></script>
 <script nonce="{{ csp_nonce }}">
 (function(){
-  /* Data */
-  var RUN_ID = '{{ run_id }}';
-  var REPORT_MODE = '{{ report_mode }}';
-  var DATA_INLINE = {{ data_inline | tojson }};
-  var DATA_ASSETS = {{ data_assets | tojson }};
   var cfg = {responsive:true, displayModeBar:false, scrollZoom:true};
 
-  function decodeInlinePayload() {
+  function safeJsonParse(raw, fallback) {
+    try {
+      return JSON.parse(raw);
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  function parseJsonScript(id, fallback) {
+    var scriptEl = document.getElementById(id);
+    if (!scriptEl) {
+      return fallback;
+    }
+    return safeJsonParse(scriptEl.textContent || "", fallback);
+  }
+
+  var META = parseJsonScript('payload-meta', {
+    run_id: 'audit-run',
+    report_mode: 'single',
+    data_assets: {}
+  });
+  var RUN_ID = (META && typeof META.run_id === 'string') ? META.run_id : 'audit-run';
+  var REPORT_MODE = META && META.report_mode === 'split' ? 'split' : 'single';
+  var DATA_ASSETS = META && typeof META.data_assets === 'object' && META.data_assets
+    ? META.data_assets
+    : {};
+
+  function ensurePayloadShape(payload) {
+    var normalized = payload && typeof payload === 'object' ? payload : {};
+    var telemetry = normalized.telemetry;
+    if (!telemetry || typeof telemetry !== 'object') {
+      telemetry = {data: [], layout: {}};
+    }
+    telemetry.data = Array.isArray(telemetry.data) ? telemetry.data : [];
+    telemetry.layout = telemetry.layout && typeof telemetry.layout === 'object'
+      ? telemetry.layout
+      : {};
     return {
-      events: JSON.parse(atob(DATA_INLINE.events || 'W10=')),
-      gps_path: JSON.parse(atob(DATA_INLINE.gps_path || 'W10=')),
-      features: JSON.parse(atob(DATA_INLINE.features || 'W10=')),
-      telemetry: JSON.parse(atob(DATA_INLINE.telemetry || 'eyJkYXRhIjpbXSwibGF5b3V0Ijp7fX0='))
+      events: Array.isArray(normalized.events) ? normalized.events : [],
+      gps_path: Array.isArray(normalized.gps_path) ? normalized.gps_path : [],
+      features: Array.isArray(normalized.features) ? normalized.features : [],
+      telemetry: telemetry
     };
   }
 
-  function loadJsonAsset(path) {
+  function decodeInlinePayload() {
+    return ensurePayloadShape({
+      events: parseJsonScript('payload-events', []),
+      gps_path: parseJsonScript('payload-gps-path', []),
+      features: parseJsonScript('payload-features', []),
+      telemetry: parseJsonScript('payload-telemetry', {data: [], layout: {}})
+    });
+  }
+
+  function loadJsonAsset(path, fallback) {
+    if (!path || typeof path !== 'string') {
+      return Promise.resolve(fallback);
+    }
     return fetch(path, {cache: 'no-store'}).then(function(resp){
       if (!resp.ok) {
         throw new Error('Asset load failed: ' + path + ' (' + resp.status + ')');
       }
       return resp.json();
+    }).catch(function(err){
+      console.warn('Asset load warning:', path, err);
+      return fallback;
     });
   }
 
   function loadPayload() {
-    if (REPORT_MODE === 'single') {
+    if (REPORT_MODE !== 'split') {
       return Promise.resolve(decodeInlinePayload());
     }
+    var inlineFallback = decodeInlinePayload();
     return Promise.all([
-      loadJsonAsset(DATA_ASSETS.events),
-      loadJsonAsset(DATA_ASSETS.gps_path),
-      loadJsonAsset(DATA_ASSETS.features),
-      loadJsonAsset(DATA_ASSETS.telemetry)
+      loadJsonAsset(DATA_ASSETS.events, inlineFallback.events),
+      loadJsonAsset(DATA_ASSETS.gps_path, inlineFallback.gps_path),
+      loadJsonAsset(DATA_ASSETS.features, inlineFallback.features),
+      loadJsonAsset(DATA_ASSETS.telemetry, inlineFallback.telemetry)
     ]).then(function(items){
-      return {
+      return ensurePayloadShape({
         events: items[0],
         gps_path: items[1],
         features: items[2],
         telemetry: items[3]
-      };
+      });
+    }).catch(function(err){
+      console.warn('Split payload load failed; falling back to inline payload.', err);
+      return inlineFallback;
     });
   }
 
   loadPayload().then(function(payload){
-  var EVENTS = payload.events || [];
-  var GPS_PATH = payload.gps_path || [];
-  var FEATURES = payload.features || [];
+  var EVENTS = payload.events;
+  var GPS_PATH = payload.gps_path;
+  var FEATURES = payload.features;
+
+  function applyEventImages(events) {
+    document.querySelectorAll('[data-primary-image]').forEach(function(img){
+      var idx = parseInt(img.getAttribute('data-event-idx') || '-1', 10);
+      var ev = (idx >= 0 && idx < events.length) ? events[idx] : null;
+      if (!ev || !ev.primary_image) {
+        return;
+      }
+      img.src = ev.primary_image;
+    });
+
+    document.querySelectorAll('[data-surround-camera]').forEach(function(img){
+      var idx = parseInt(img.getAttribute('data-event-idx') || '-1', 10);
+      var camera = img.getAttribute('data-surround-camera');
+      var ev = (idx >= 0 && idx < events.length) ? events[idx] : null;
+      var surround = ev && ev.surround && typeof ev.surround === 'object' ? ev.surround : null;
+      if (!surround || !camera || !surround[camera]) {
+        return;
+      }
+      img.src = surround[camera];
+    });
+  }
+
+  applyEventImages(EVENTS);
+  var currentFrameImg = document.getElementById('current-frame-img');
+  if (currentFrameImg && EVENTS.length > 0 && EVENTS[0].primary_image) {
+    currentFrameImg.src = EVENTS[0].primary_image;
+  }
+
   /* 鈹€鈹€ Split.js Layout 鈹€鈹€ */
   var sizes = sessionStorage.getItem('split-sizes');
   if (sizes) sizes = JSON.parse(sizes);
@@ -1188,7 +1419,7 @@ body{
   });
 
   /* 鈹€鈹€ Plotly: Main Chart 鈹€鈹€ */
-  var telData = payload.telemetry || {data: [], layout: {}};
+  var telData = payload.telemetry;
   var telEl = document.getElementById('chart-telemetry');
   Plotly.newPlot(telEl, telData.data, telData.layout, cfg);
 
@@ -1406,7 +1637,6 @@ body{
   if (FEATURES.length > 0) {
     playheadInput.max = FEATURES[FEATURES.length - 1]._elapsed;
   }
-  var currentFrameImg = document.getElementById('current-frame-img');
   var currentFrameMarker = null;
 
   playheadInput.addEventListener('input', function(e) {

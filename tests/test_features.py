@@ -21,6 +21,17 @@ def data_dir() -> Path:
     return PROJECT_ROOT.parent / "provided_data"
 
 
+class _DepthOnlyLoader:
+    def __init__(self, frames_dir: Path) -> None:
+        self.frames_dir = frames_dir
+
+
+def _write_depth_frame(path: Path, value_mm: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    depth = np.full((24, 24), value_mm, dtype=np.uint16)
+    Image.fromarray(depth).save(path)
+
+
 @pytest.fixture(scope="module")
 def loader() -> LogLoader:
     return LogLoader(data_dir())
@@ -218,6 +229,97 @@ def test_depth_feature_cache_reuses_results(
     monkeypatch.setattr("agri_auditor.features.Image.open", _fail_open)
     second = engine._compute_frame_depth_features(frame_idx, True)
     assert np.allclose(np.array(first), np.array(second), equal_nan=True)
+
+
+def test_depth_batch_uses_process_pool_when_workers_gt_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    depth_dir = tmp_path / "frames" / "depth"
+    _write_depth_frame(depth_dir / "0001.png", 1800)
+    _write_depth_frame(depth_dir / "0002.png", 2100)
+    loader = _DepthOnlyLoader(tmp_path / "frames")
+    engine = FeatureEngine(loader=loader, depth_workers=2)
+
+    calls: list[int] = []
+
+    class _FakeProcessPoolExecutor:
+        def __init__(self, max_workers: int) -> None:
+            calls.append(max_workers)
+
+        def __enter__(self) -> "_FakeProcessPoolExecutor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+            return False
+
+        def map(self, func, iterable):  # type: ignore[no-untyped-def]
+            return [func(item) for item in iterable]
+
+    monkeypatch.setattr(
+        "agri_auditor.features.ProcessPoolExecutor",
+        _FakeProcessPoolExecutor,
+    )
+    results = engine._compute_depth_features_batch(
+        pd.Series([1, 2]),
+        pd.Series([True, True]),
+    )
+    assert calls == [2]
+    assert len(results) == 2
+    assert all(np.isfinite(val[0]) for val in results)
+
+
+def test_depth_feature_cache_persists_as_parquet_and_reuses_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    depth_dir = tmp_path / "frames" / "depth"
+    depth_path = depth_dir / "0001.png"
+    _write_depth_frame(depth_path, 1950)
+    cache_dir = tmp_path / "cache"
+
+    loader = _DepthOnlyLoader(tmp_path / "frames")
+    first_engine = FeatureEngine(loader=loader, depth_workers=1, depth_cache_dir=cache_dir)
+    first = first_engine._compute_frame_depth_features(1, True)
+    cache_file = cache_dir / "depth_feature_cache.parquet"
+    assert cache_file.exists()
+
+    second_engine = FeatureEngine(loader=loader, depth_workers=1, depth_cache_dir=cache_dir)
+
+    def _fail_open(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Depth image should not be reopened when cache is warm.")
+
+    monkeypatch.setattr("agri_auditor.features.Image.open", _fail_open)
+    second = second_engine._compute_frame_depth_features(1, True)
+    assert np.allclose(np.array(first), np.array(second), equal_nan=True)
+
+
+def test_depth_feature_cache_invalidates_when_depth_file_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    depth_dir = tmp_path / "frames" / "depth"
+    depth_path = depth_dir / "0001.png"
+    _write_depth_frame(depth_path, 2000)
+    cache_dir = tmp_path / "cache"
+    loader = _DepthOnlyLoader(tmp_path / "frames")
+
+    first_engine = FeatureEngine(loader=loader, depth_workers=1, depth_cache_dir=cache_dir)
+    first_engine._compute_frame_depth_features(1, True)
+
+    _write_depth_frame(depth_path, 1200)
+    open_calls = 0
+    original_open = Image.open
+
+    def _counting_open(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        nonlocal open_calls
+        open_calls += 1
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr("agri_auditor.features.Image.open", _counting_open)
+    second_engine = FeatureEngine(loader=loader, depth_workers=1, depth_cache_dir=cache_dir)
+    second_engine._compute_frame_depth_features(1, True)
+    assert open_calls >= 1
 
 
 def _count_valid_depth_frames(loader: LogLoader, df: pd.DataFrame) -> int:

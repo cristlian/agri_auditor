@@ -6,6 +6,7 @@ import pytest
 
 from agri_auditor.config import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMINI_JITTER_RATIO,
     DEFAULT_GEMINI_TIMEOUT_SEC,
     DEFAULT_LOG_FORMAT,
     DEFAULT_LOG_LEVEL,
@@ -24,6 +25,7 @@ def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGRI_AUDITOR_GEMINI_WORKERS",
         "AGRI_AUDITOR_GEMINI_RETRIES",
         "AGRI_AUDITOR_GEMINI_BACKOFF_MS",
+        "AGRI_AUDITOR_GEMINI_JITTER_RATIO",
         "AGRI_AUDITOR_GEMINI_CACHE_DIR",
         "AGRI_AUDITOR_DEPTH_WORKERS",
         "AGRI_AUDITOR_DEPTH_CACHE_DIR",
@@ -48,6 +50,7 @@ def test_load_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.log_format == DEFAULT_LOG_FORMAT
     assert config.gemini_model == DEFAULT_GEMINI_MODEL
     assert config.gemini_timeout_sec == DEFAULT_GEMINI_TIMEOUT_SEC
+    assert config.gemini_jitter_ratio == DEFAULT_GEMINI_JITTER_RATIO
 
 
 def test_load_runtime_config_invalid_log_format(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,7 +73,7 @@ def test_load_runtime_config_accepts_numeric_log_level(
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("AGRI_AUDITOR_LOG_LEVEL", "20")
     config = load_runtime_config()
-    assert config.log_level == "20"
+    assert config.log_level == 20
 
 
 def test_resolve_log_format_auto_non_tty_is_json() -> None:
@@ -93,6 +96,7 @@ def test_configure_logging_accepts_json_and_console() -> None:
 
 def test_configure_logging_accepts_numeric_level() -> None:
     assert configure_logging("20", "json") == "json"
+    assert configure_logging(20, "json") == "json"
 
 
 def test_log_event_emits_without_error() -> None:

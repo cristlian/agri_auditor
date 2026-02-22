@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agri-auditor.local/schemas/run_metadata.schema.json",
+  "title": "Agri-Auditor Run Metadata",
+  "type": "object",
+  "required": [
+    "dataset_hash",
+    "code_version",
+    "config_fingerprint",
+    "latency_summary"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "dataset_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "code_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "config_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "latency_summary": {
+      "type": "object",
+      "required": [
+        "count",
+        "avg_ms",
+        "p50_ms",
+        "p95_ms",
+        "p99_ms"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avg_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "p50_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "p95_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "p99_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

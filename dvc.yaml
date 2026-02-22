@@ -1,0 +1,31 @@
+stages:
+  features:
+    cmd: python -m agri_auditor features --data-dir ../provided_data --output artifacts/features.csv
+    deps:
+      - src/agri_auditor/cli.py
+      - src/agri_auditor/features.py
+      - src/agri_auditor/ingestion.py
+      - ../provided_data/manifest.csv
+      - ../provided_data/calibrations.json
+    outs:
+      - artifacts/features.csv
+  events:
+    cmd: python -m agri_auditor events --data-dir ../provided_data --features-csv artifacts/features.csv --output artifacts/events.json --disable-gemini
+    deps:
+      - src/agri_auditor/cli.py
+      - src/agri_auditor/intelligence.py
+      - artifacts/features.csv
+      - ../provided_data/manifest.csv
+      - ../provided_data/calibrations.json
+    outs:
+      - artifacts/events.json
+  report:
+    cmd: python -m agri_auditor report --data-dir ../provided_data --features-csv artifacts/features.csv --events-json artifacts/events.json --output artifacts/audit_report.html --report-mode split --no-surround
+    deps:
+      - src/agri_auditor/cli.py
+      - src/agri_auditor/reporting.py
+      - artifacts/features.csv
+      - artifacts/events.json
+    outs:
+      - artifacts/audit_report.html
+      - artifacts/audit_report_assets

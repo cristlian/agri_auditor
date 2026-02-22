@@ -25,8 +25,20 @@ jobs:
       - name: Prepare test data
         run: python scripts/prepare_test_data.py --output-dir ../provided_data
 
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Type check
+        run: python -m mypy src
+
+      - name: Validate run metadata schema
+        run: python -m pytest -q tests/test_run_metadata_schema.py
+
       - name: Run deterministic unit suite
         run: python -m pytest -q
+
+      - name: Run performance budget gate
+        run: python scripts/check_perf_budget.py --summary-json artifacts/perf_budget_summary.json
 
   gemini-live:
     runs-on: ubuntu-latest

@@ -1,266 +1,89 @@
 ﻿# Agri-Auditor Intelligence Roadmap
 
-## CTO Deep Dive Edition
+## CTO Upgrade Completion Snapshot
 
-**Last updated:** February 21, 2026  
-**Canonical source:** `high level discussion/intelligence_roadmap_1`  
-**Repo mirror:** `docs/intelligence_roadmap.md`
-
----
-
-## 1. Vision
-
-### Product thesis
-Agri-Auditor is a post-mission intelligence system for autonomous tractor logs. It converts high-volume multi-sensor telemetry into a compact, operator-ready incident narrative:
-
-1. Detect high-severity moments with deterministic signal processing.
-2. Add semantic context on those moments using a VLM (Gemini 3 Flash).
-3. Deliver a portable, interactive mission report for engineering, operations, and leadership review.
-
-### Why this matters
-The product addresses the core operational bottleneck: teams cannot manually review full mission timelines at fleet scale. Agri-Auditor reduces the review surface from full-drive telemetry to ranked incident windows with supporting evidence.
-
-### Deliverable contract
-Primary artifact: `audit_report.html` (interactive dashboard) plus optional `features.csv` and `events.json`.
+Last updated: February 22, 2026
+Canonical source: `high level discussion/intelligence_roadmap_1`
+Repo mirror: `docs/intelligence_roadmap.md`
+Execution contract: `docs/cto_upgrade_completion_handoff.md` (dated February 21, 2026)
 
 ---
 
-## 2. Scope and Current Status
+## 1) Completion Scope
 
-### Program scope
-The roadmap is organized into six phases:
+This update closes the CTO Story-First Upgrade Portfolio completion pass for points 1 through 8.1, with point 8.2 explicitly staged as the next phase.
 
-1. Data Rig (ingestion and calibration handling)
-2. Physics and Feature Engineering
-3. Intelligence Layer (event scoring plus VLM captions)
-4. Mission Control Dashboard
-5. Productionization (CLI, Docker, CI, runtime config)
-6. Documentation and final polish
+Non-negotiable ordering that was enforced:
+1. Security and correctness.
+2. Performance and scalability.
+3. Operational maturity and team readiness.
+4. Deterministic testability and CI gating.
 
-### Status as of February 21, 2026
+---
 
-| Phase | Status | Date | Evidence |
+## 2) Implemented vs Next Phase
+
+| Point | Contract | Status (2026-02-22) | Validated implementation evidence |
 |---|---|---|---|
-| Phase 1: Data Rig | Completed | 2026-02-12 | `python -m pytest -q` => `7 passed` |
-| Phase 2: Features | Completed | 2026-02-12 | `python -m pytest -q` => `13 passed`; `rows=1085` export |
-| Phase 2.5: Agri-Physics Expansion | Completed | 2026-02-12 | `tests/test_features.py` => `13 passed` |
-| Phase 3: Intelligence | Completed | 2026-02-12 | `python -m pytest -q` => `21 passed`, later `31 passed` after revisions |
-| Phase 4: Dashboard v1/v2 | Completed | 2026-02-20 | v1 `66 passed, 3 skipped`; v2 `34 passed`; report produced |
-| Phase 5: Productionization | Completed | 2026-02-21 | deterministic suite `82 passed, 3 deselected` |
-| Phase 6: Documentation and polish | In progress | 2026-02-21 | This document refresh |
+| 1 | `1.1 + 1.2` security hardening | Implemented | JSON payload script blocks + `JSON.parse` bootstrap + `sanitize_model_text` caption sanitation in `src/agri_auditor/reporting.py`; security tests in `tests/test_reporting.py` |
+| 2 | `2.1 + 2.2` report payload scale | Implemented | Split-mode external JSON assets + image materialization under `*_assets/images/`; single-mode self-contained behavior in `src/agri_auditor/reporting.py`; parity/size tests in `tests/test_reporting.py` |
+| 3 | `3.1 + 3.3` Gemini SLA and jitter | Implemented | Jittered exponential backoff + SDK timeout wrapper + preserved circuit/cache behavior in `src/agri_auditor/intelligence.py`; resilience tests in `tests/test_intelligence.py` |
+| 4 | `4.1 + 4.3` depth multiprocess + persistent cache | Implemented | Process-pool execution path (with controlled fallback when process spawn is blocked) + Parquet persistent cache with atomic replacement and in-memory hot cache in `src/agri_auditor/features.py`; new coverage in `tests/test_features.py` |
+| 5 | `5.1` event quality stability | Implemented | Robust normalization and peak constraints preserved as defaults; regression coverage retained in `tests/test_intelligence.py` |
+| 6 | `6.1 + 6.2` packaging/import hygiene | Implemented | Optional report dependency split/lazy import preserved; CLI behavior regression coverage in `tests/test_cli.py` |
+| 7 | `7.1` numeric log-level type exactness | Implemented | Numeric log level persists as `int` in runtime config and logging configuration accepts `str | int`; coverage in `tests/test_config_logging.py` |
+| 8 | `8.1` MLOps hardening for this phase | Implemented | CI gates expanded (lint/type/schema/tests/perf), metadata schema added, perf gate script added, DVC lineage stages added, optional MLflow lineage hook added |
+| 8.2 | Service/API orchestration extension | Staged next phase (not implemented in this pass) | Scope preserved as next increment: thin FastAPI + worker queue + artifact store |
 
 ---
 
-## 3. Data Reality and Constraints
+## 3) New MLOps and Governance Artifacts (8.1)
 
-The implementation is intentionally designed around observed dataset constraints:
-
-1. Calibration dimensions may be zero in calibration JSON for `front_center_stereo_left`.
-2. Depth is sparse (about 31 percent of frames).
-3. `gps_speed` is missing; velocity is derived from pose deltas.
-4. Depth is `uint16` in millimeters, and zero values are invalid and must be masked.
-
-### Engineering implications
-
-1. Camera model dimensions are inferred from real images when calibration width and height are zero.
-2. Depth gaps are preserved as blind intervals (`NaN`) instead of interpolated values.
-3. Feature extraction and scoring are NaN-safe by design.
-4. Safety metrics are built from valid depth pixels only.
+Added in this completion pass:
+1. Run metadata schema: `schemas/run_metadata.schema.json`
+2. Schema tests: `tests/test_run_metadata_schema.py`
+3. Perf budget gate: `scripts/check_perf_budget.py`
+4. Perf gate tests: `tests/test_perf_budget.py`
+5. DVC lineage stages: `dvc.yaml`, `.dvc/config`, `.dvc/.gitignore`
+6. Optional MLflow lineage logging (no hard fail when disabled/unavailable): `src/agri_auditor/mlops.py`
+7. CI gate expansion: `.github/workflows/ci.yml` now runs `ruff`, `mypy`, metadata schema lane, deterministic tests, and perf budget gate.
 
 ---
 
-## 4. Architecture
+## 4) Deterministic Validation Evidence (February 22, 2026)
 
-### System architecture
+Focused lanes:
+1. `pytest -q tests/test_reporting.py` -> `41 passed`
+2. `pytest -q tests/test_intelligence.py` -> `21 passed`
+3. `pytest -q tests/test_features.py` -> `17 passed`
+4. `pytest -q tests/test_config_logging.py` -> `9 passed`
+5. `pytest -q tests/test_cli.py` -> `5 passed`
+6. `pytest -q tests/test_run_metadata_schema.py` -> `3 passed`
 
-```mermaid
-graph TD
-    A[Raw Data Directory] --> B[LogLoader]
-    B --> C[FeatureEngine]
-    C --> D[Feature Table]
-    D --> E[EventDetector find_peaks]
-    E --> F[Top-K Event Candidates]
-    F --> G[GeminiAnalyst Optional]
-    F --> H[Event Records]
-    G --> H
-    D --> I[ReportBuilder]
-    H --> I
-    I --> J[audit_report.html]
-    D --> K[features.csv]
-    H --> L[events.json]
-```
+Full deterministic lane:
+1. `pytest -q` -> `108 passed, 3 deselected` (`gemini_live` intentionally deselected)
 
-### Module map
-
-- `src/agri_auditor/ingestion.py`: manifest loading, velocity derivation, calibration resolution, image access
-- `src/agri_auditor/features.py`: roughness, clearance, canopy proxy, orientation, sensor-health features
-- `src/agri_auditor/intelligence.py`: scoring, event ranking, Gemini integration, serialization
-- `src/agri_auditor/reporting.py`: interactive dashboard generation
-- `src/agri_auditor/cli.py`: unified commands (`features`, `events`, `report`, `process`, `benchmark-gemini`)
-- `.github/workflows/ci.yml`: deterministic lane plus optional `gemini_live` lane
+Local CI-equivalent gates:
+1. `ruff check .` -> pass
+2. `mypy src` -> pass
+3. `python scripts/check_perf_budget.py` -> pass
 
 ---
 
-## 5. Reliability and Security Posture
+## 5) Operational Notes
 
-### Reliability controls implemented
-
-1. Safe-value imputation in severity scoring:
-- `roughness -> 0`
-- `yaw_rate -> 0`
-- `imu_correlation -> 1.0`
-- `pose_confidence -> 100`
-
-2. Final severity hardening:
-- `replace([inf, -inf], nan).fillna(0.0)`
-
-3. Depth safety behavior:
-- missing depth remains blind (`NaN`), not interpolated
-
-4. Gemini resilience:
-- SDK primary path
-- REST fallback path
-- graceful degradation to `AI Analysis Unavailable`
-
-5. Runtime safety:
-- Docker runs as non-root user (`agri`)
-
-### Security boundary
-
-1. Gemini output is treated as explanatory metadata for audit context.
-2. AI output is not used for real-time control decisions.
-3. Known risk: visual hallucination remains possible; mitigated by limiting AI usage to post-mission narrative support.
-
-### Risk register
-
-| Risk | Impact | Current mitigation | Next hardening step |
-|---|---|---|---|
-| VLM hallucination | Misleading narrative labels | AI is advisory only; deterministic signals remain source of detection | Add explicit confidence and citation fields per caption |
-| Calibration drift | Incorrect spatial interpretation | Dynamic dimension inference and calibration checks | Add periodic online calibration validation |
-| Depth dropout | False confidence in clearance | Blind intervals represented as `NaN` | Add dropout-specific event type and dashboard warnings |
+1. Process-pool depth extraction is active when environment permits process creation; controlled fallback to in-process execution is kept to preserve deterministic behavior in restricted sandboxes.
+2. Run metadata contract (`dataset_hash`, `code_version`, `config_fingerprint`, `latency_summary`) is now schema-validated in test and CI gates.
+3. MLflow lineage is optional and non-blocking by design to avoid hard runtime failures when MLflow is not installed or disabled.
 
 ---
 
-## 6. Performance and Scalability
+## 6) Next-Phase Staging (8.2 Only)
 
-### Event captioning model benchmark (executed)
+This completion pass does not implement 8.2 runtime orchestration.
 
-**Benchmark setup:** 5 real event frames (`89, 272, 609, 797, 1034`), 2 repeats each model (20 total calls).  
-**Archive:** `artifacts/gemini_benchmark_comparison.json`
+Planned 8.2 extension:
+1. Thin FastAPI service for multi-run submission.
+2. Background worker queue for asynchronous feature/event/report jobs.
+3. Artifact store abstraction for run outputs and lineage metadata.
 
-| Metric | Gemini 3 Flash | Gemini 2.5 Flash |
-|---|---:|---:|
-| Success rate | 100% (10/10) | 100% (10/10) |
-| Latency p50 | 3,507 ms | 4,835 ms |
-| Latency avg | 3,654 ms | 5,058 ms |
-| Latency p95 | 5,500 ms | 6,538 ms |
-| Throughput | 16.4 calls/min | 11.9 calls/min |
-| Thinking tokens total | 2,357 | 6,668 |
-| Output tokens total | 304 | 230 |
-| Total tokens total | 13,841 | 9,738 |
-
-### Model decision
-Gemini 3 Flash (`gemini-3-flash-preview`) is adopted for this workflow because it improves latency and throughput while maintaining strong qualitative relevance and specificity.
-
-### Pipeline performance evidence
-
-| Checkpoint | Date | Result |
-|---|---|---|
-| Feature export | 2026-02-12 | `rows=1085`, `roughness_non_null=1085`, `min_clearance_m_non_null=343` |
-| Events export (offline) | 2026-02-12 | `rows_processed=1085`, `peaks_found=6`, `top_k_written=5` |
-| Report generation (cockpit v1) | 2026-02-20 | `1232.3 KB` in `1.5s` |
-| Report generation (cockpit v2) | 2026-02-20 | `3587.9 KB` in `~16s` |
-
-### Scalability tradeoffs (current design)
-
-| Decision | Benefit | Cost |
-|---|---|---|
-| `find_peaks` prefilter before VLM | Controls API volume and latency | May miss incidents not reflected in selected signals |
-| Static HTML artifact | Easy sharing and review | Large file size with embedded media |
-| Rich UI interactivity (Split.js, map sync, CSV export) | High triage usability | Larger frontend complexity |
-
----
-
-## 7. MLOps and Operationalization
-
-### Runtime and deployment
-
-1. Dockerized runtime (`python:3.13-slim`) with non-root execution.
-2. Unified package CLI (`python -m agri_auditor` and `agri-auditor`).
-3. Config-driven runtime via `.env.example` and validated runtime config.
-4. Structured logging support (`json`, `console`, `auto`).
-
-### CI strategy
-
-- Deterministic lane: `python -m pytest -q` (default excludes `gemini_live`)
-- Live lane: `python -m pytest -q -m gemini_live -o addopts="-p no:cacheprovider"`
-- Live lane is gated on `GEMINI_API_KEY`
-- CI prepares synthetic `provided_data` via `scripts/prepare_test_data.py`
-
-### Proven operational path
-
-```bash
-python -m agri_auditor process \
-  --data-dir ../provided_data \
-  --output-features artifacts/features.csv \
-  --output-events artifacts/events.json \
-  --output-report artifacts/audit_report.html \
-  --disable-gemini
-```
-
----
-
-## 8. Delivery Timeline
-
-### Completed delivery milestones
-
-| Date | Milestone | Highlights |
-|---|---|---|
-| 2026-02-12 | Steps 1 to 3 completed | ingestion, features, initial intelligence pipeline with tests |
-| 2026-02-12 | Phase 2.5 and Step 3 revision completed | orientation, health signals, NaN-safe multi-modal scoring, surround paths |
-| 2026-02-20 | Step 4 completed (v1 then v2) | cockpit UI, Split.js layout, synchronized telemetry-map-feed interactions |
-| 2026-02-21 | Step 5 completed | Docker, unified CLI, config/logging, CI gating, expanded tests |
-
-### Remaining work (Phase 6)
-
-1. Final documentation standardization and stakeholder packaging.
-2. Architecture diagram and concise operations runbook for onboarding.
-3. Optional: tighten reporting artifact strategy for larger missions.
-
----
-
-## 9. CTO Discussion Guide
-
-### Product narrative (technical)
-
-"Agri-Auditor is a deterministic-plus-GenAI incident audit stack. We use signal processing to detect where to look, then use Gemini only on those windows to explain what happened. This keeps cost and latency bounded while preserving semantic depth for operators and executives."
-
-### Design choices and rationale
-
-1. Hybrid intelligence (signals for detection, VLM for explanation)
-- Why: full-frame VLM scanning is too expensive for mission-length logs.
-
-2. Blind depth handling
-- Why: interpolating missing depth can create false safety confidence.
-
-3. Static report artifact
-- Why: zero-dependency sharing for field and leadership workflows.
-
-### CTO-level questions to drive alignment
-
-1. Edge versus cloud target for this workload in the next 12 months.
-2. Whether incident frames are currently fed back into model training workflows.
-3. Sensor roadmap expectations (stereo-only versus stereo plus LiDAR).
-4. Preferred localization strategy in low-GPS reliability environments.
-5. Obstacle reasoning preference (ROI depth heuristics versus occupancy-grid integration).
-
----
-
-## 10. Acceptance Checklist
-
-This rewrite satisfies the documentation acceptance criteria:
-
-1. Major claims are traceable to `high level discussion/intelligence_roadmap_1` metrics and progress logs.
-2. Timeline statements use explicit dates and are internally consistent as of February 21, 2026.
-3. Document tone is executive-technical and removes iterative dev-note verbosity.
-4. `high level discussion/intelligence_roadmap_1` and `docs/intelligence_roadmap.md` are aligned in content and recommendations.

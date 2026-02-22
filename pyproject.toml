@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.2.2",
     "pillow>=11.1.0",
     "scipy>=1.15.1",
+    "pyarrow>=19.0.0",
     "google-genai>=1.2.0",
     "python-dotenv>=1.0.0",
     "structlog>=24.4.0",
@@ -22,10 +23,17 @@ dev = [
     "pytest>=8.3.4",
     "plotly>=5.18.0",
     "jinja2>=3.1.0",
+    "ruff>=0.12.0",
+    "mypy>=1.11.2",
+    "jsonschema>=4.23.0",
 ]
 report = [
     "plotly>=5.18.0",
     "jinja2>=3.1.0",
+]
+mlops = [
+    "mlflow>=2.17.0",
+    "dvc>=3.59.0",
 ]
 
 [tool.pytest.ini_options]
@@ -35,6 +43,24 @@ addopts = "-p no:cacheprovider -m \"not gemini_live\""
 markers = [
     "gemini_live: tests that require a live GEMINI_API_KEY and network access",
 ]
+
+[tool.ruff]
+target-version = "py313"
+extend-exclude = [
+    ".venv",
+    ".github/skills",
+    ".github/instructions",
+    ".pytest-local",
+    ".pytest-tmp",
+    ".pytest_tmp_root",
+]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
 
 [build-system]
 requires = ["setuptools>=75.0"]

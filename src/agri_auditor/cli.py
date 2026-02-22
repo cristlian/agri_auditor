@@ -26,6 +26,7 @@ from .intelligence import (
     UNAVAILABLE_CAPTION,
 )
 from .logging_config import configure_logging, get_logger, log_event
+from .mlops import log_run_lineage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -177,6 +178,7 @@ def _build_run_metadata(
         "gemini_workers": _resolve_optional_arg(args, "gemini_workers", runtime.gemini_workers),
         "gemini_retries": _resolve_optional_arg(args, "gemini_retries", runtime.gemini_retries),
         "gemini_backoff_ms": _resolve_optional_arg(args, "gemini_backoff_ms", runtime.gemini_backoff_ms),
+        "gemini_jitter_ratio": runtime.gemini_jitter_ratio,
         "depth_workers": _resolve_optional_arg(args, "depth_workers", runtime.depth_workers),
         "score_normalization": _resolve_optional_arg(args, "score_normalization", runtime.score_normalization),
         "score_q_low": _resolve_optional_arg(args, "score_robust_quantile_low", runtime.score_robust_quantile_low),
@@ -288,6 +290,7 @@ def _init_analyst(
                 timeout_sec=runtime.gemini_timeout_sec,
                 retries=retries,
                 backoff_ms=backoff_ms,
+                jitter_ratio=runtime.gemini_jitter_ratio,
                 cache_dir=cache_dir,
             ),
             None,
@@ -648,6 +651,12 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
     )
     output_report.parent.mkdir(parents=True, exist_ok=True)
     out = builder.save_report(output_report)
+    mlflow_logged = log_run_lineage(
+        run_metadata=run_metadata,
+        run_id=args.run_id,
+        command_name="process",
+        artifacts=[output_features, output_events, out],
+    )
 
     elapsed = time.perf_counter() - started
     log_event(
@@ -661,6 +670,7 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
         output_features=str(output_features),
         output_events=str(output_events),
         output_report=str(out),
+        mlflow_logged=mlflow_logged,
         elapsed_sec=round(elapsed, 3),
     )
     return 0
@@ -695,6 +705,7 @@ def _cmd_benchmark_gemini(args: argparse.Namespace, runtime: RuntimeConfig, logg
         backoff_ms=int(
             _resolve_optional_arg(args, "gemini_backoff_ms", runtime.gemini_backoff_ms)
         ),
+        jitter_ratio=runtime.gemini_jitter_ratio,
         cache_dir=_resolve_optional_arg(args, "gemini_cache_dir", runtime.gemini_cache_dir),
     )
 
@@ -819,11 +830,20 @@ def _summarize_model_runs(
     error_count = call_count - success_count
     error_rate = (error_count / call_count) if call_count else 0.0
 
-    latencies = [
-        float(row["latency_ms"])
-        for row in model_runs
-        if row.get("latency_ms") is not None
-    ]
+    latencies: list[float] = []
+    for row in model_runs:
+        raw_latency = row.get("latency_ms")
+        if raw_latency is None:
+            continue
+        if not isinstance(raw_latency, (int, float, str, bytes, bytearray)):
+            continue
+        try:
+            parsed_latency = float(raw_latency)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(parsed_latency):
+            continue
+        latencies.append(parsed_latency)
     p50 = _percentile(latencies, 50.0)
     p95 = _percentile(latencies, 95.0)
     p99 = _percentile(latencies, 99.0)
@@ -856,6 +876,8 @@ def _sum_optional_ints(values: list[object]) -> int | None:
     converted: list[int] = []
     for value in values:
         if value is None:
+            continue
+        if not isinstance(value, (int, float, str, bytes, bytearray)):
             continue
         try:
             converted.append(int(value))

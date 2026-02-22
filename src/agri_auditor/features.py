@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ DEFAULT_WINDOW_SAMPLES_FALLBACK = 30
 DEFAULT_DEPTH_SUBDIR = "depth"
 DEFAULT_VELOCITY_GATE_MPS = 0.1
 DEFAULT_DEPTH_WORKERS = 4
+DEFAULT_DEPTH_CACHE_FILENAME = "depth_feature_cache.parquet"
 
 _QUAT_COLS = (
     "pose_front_center_stereo_left_qx",
@@ -30,6 +31,76 @@ _QUAT_COLS = (
     "pose_front_center_stereo_left_qw",
 )
 _POSE_CONFIDENCE_COL = "pose_front_center_stereo_left_confidence"
+
+
+@dataclass(frozen=True)
+class _DepthCacheEntry:
+    cache_key: str
+    frame_idx: int
+    mtime_ns: int
+    size_bytes: int
+    params_hash: str
+
+
+def _center_crop_array(image: np.ndarray, crop_ratio: float) -> np.ndarray:
+    height, width = image.shape[:2]
+    crop_h = max(1, int(round(height * crop_ratio)))
+    crop_w = max(1, int(round(width * crop_ratio)))
+    y0 = max((height - crop_h) // 2, 0)
+    x0 = max((width - crop_w) // 2, 0)
+    y1 = min(y0 + crop_h, height)
+    x1 = min(x0 + crop_w, width)
+    return image[y0:y1, x0:x1]
+
+
+def _upper_crop_array(image: np.ndarray, crop_ratio: float) -> np.ndarray:
+    height, _width = image.shape[:2]
+    crop_h = max(1, int(round(height * crop_ratio)))
+    return image[0:crop_h, :]
+
+
+def _compute_depth_features_from_path(
+    *,
+    depth_path: str | Path,
+    depth_crop_ratio: float,
+    canopy_crop_ratio: float,
+    clearance_percentile: float,
+) -> tuple[float, float]:
+    path = Path(depth_path)
+    try:
+        with Image.open(path) as image:
+            depth_image = np.asarray(image)
+    except OSError:
+        return (float("nan"), float("nan"))
+
+    if depth_image.ndim < 2:
+        return (float("nan"), float("nan"))
+
+    center_roi = _center_crop_array(depth_image, depth_crop_ratio)
+    valid_center = center_roi[center_roi > 0]
+    if valid_center.size == 0:
+        min_clearance_m = float("nan")
+    else:
+        min_clearance_m = float(np.percentile(valid_center, clearance_percentile)) / 1000.0
+
+    upper_roi = _upper_crop_array(depth_image, canopy_crop_ratio)
+    valid_upper = upper_roi[upper_roi > 0]
+    if valid_upper.size == 0:
+        canopy_density_proxy = float("nan")
+    else:
+        canopy_density_proxy = float(np.mean(valid_upper)) / 1000.0
+
+    return (min_clearance_m, canopy_density_proxy)
+
+
+def _depth_feature_worker(task: tuple[str, float, float, float]) -> tuple[float, float]:
+    path, depth_crop_ratio, canopy_crop_ratio, clearance_percentile = task
+    return _compute_depth_features_from_path(
+        depth_path=path,
+        depth_crop_ratio=depth_crop_ratio,
+        canopy_crop_ratio=canopy_crop_ratio,
+        clearance_percentile=clearance_percentile,
+    )
 
 
 class FeatureEngine:
@@ -68,6 +139,10 @@ class FeatureEngine:
             else None
         )
         self._depth_feature_memory_cache: dict[str, tuple[float, float]] = {}
+        self._depth_cache_records: dict[str, dict[str, object]] = {}
+        self._depth_cache_loaded = False
+        self._depth_cache_dirty = False
+        self._depth_params_hash = self._compute_depth_params_hash()
 
     def build_features(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         base_df = self.loader.load_manifest() if df is None else df
@@ -235,7 +310,7 @@ class FeatureEngine:
     # ------------------------------------------------------------------
 
     def _compute_frame_depth_features(
-        self, frame_idx: Any, has_depth: Any,
+        self, frame_idx: Any, has_depth: Any, *, flush_cache: bool = True,
     ) -> tuple[float, float]:
         """Return (min_clearance_m, canopy_density_proxy) for a single frame."""
         if not self._as_bool(has_depth):
@@ -249,41 +324,21 @@ class FeatureEngine:
         if not depth_path.exists():
             return (float("nan"), float("nan"))
 
-        cache_key = self._depth_cache_key(int(frame_number), depth_path)
+        cache_entry = self._depth_cache_entry(int(frame_number), depth_path)
+        cache_key = cache_entry.cache_key if cache_entry is not None else None
         cached = self._read_cached_depth_features(cache_key)
         if cached is not None:
             return cached
 
-        try:
-            with Image.open(depth_path) as image:
-                depth_image = np.asarray(image)
-        except OSError:
-            return (float("nan"), float("nan"))
-
-        if depth_image.ndim < 2:
-            return (float("nan"), float("nan"))
-
-        # Clearance: center crop, 5th percentile
-        center_roi = self._center_crop(depth_image)
-        valid_center = center_roi[center_roi > 0]
-        if valid_center.size == 0:
-            min_clearance_m = float("nan")
-        else:
-            min_clearance_m = float(
-                np.percentile(valid_center, self.clearance_percentile)
-            ) / 1000.0
-
-        # Canopy density: upper crop, mean depth
-        upper_roi = self._upper_crop(depth_image)
-        valid_upper = upper_roi[upper_roi > 0]
-        if valid_upper.size == 0:
-            canopy_density_proxy = float("nan")
-        else:
-            # Lower mean depth = denser canopy (things are closer overhead)
-            canopy_density_proxy = float(np.mean(valid_upper)) / 1000.0
-
-        result = (min_clearance_m, canopy_density_proxy)
-        self._write_cached_depth_features(cache_key, result)
+        result = _compute_depth_features_from_path(
+            depth_path=depth_path,
+            depth_crop_ratio=self.depth_crop_ratio,
+            canopy_crop_ratio=self.canopy_crop_ratio,
+            clearance_percentile=self.clearance_percentile,
+        )
+        self._write_cached_depth_features(cache_entry, result)
+        if flush_cache:
+            self._flush_depth_cache()
         return result
 
     def _compute_depth_features_batch(
@@ -293,16 +348,73 @@ class FeatureEngine:
     ) -> list[tuple[float, float]]:
         work_items = list(zip(frame_indices.tolist(), has_depth_series.tolist()))
         if self.depth_workers <= 1 or len(work_items) <= 1:
-            return [self._compute_frame_depth_features(frame_idx, has_depth) for frame_idx, has_depth in work_items]
-        with ThreadPoolExecutor(max_workers=self.depth_workers) as executor:
-            return list(
-                executor.map(
-                    lambda item: self._compute_frame_depth_features(item[0], item[1]),
-                    work_items,
+            sequential_results = [
+                self._compute_frame_depth_features(
+                    frame_idx,
+                    has_depth,
+                    flush_cache=False,
+                )
+                for frame_idx, has_depth in work_items
+            ]
+            self._flush_depth_cache()
+            return sequential_results
+        results: list[tuple[float, float]] = [
+            (float("nan"), float("nan")) for _ in work_items
+        ]
+        pending_tasks: list[tuple[str, float, float, float]] = []
+        pending_meta: list[tuple[int, _DepthCacheEntry | None]] = []
+
+        for row_idx, (frame_idx, has_depth) in enumerate(work_items):
+            if not self._as_bool(has_depth):
+                continue
+
+            frame_number = pd.to_numeric(frame_idx, errors="coerce")
+            if pd.isna(frame_number):
+                continue
+
+            depth_path = self._depth_path_for_frame(int(frame_number))
+            if not depth_path.exists():
+                continue
+
+            cache_entry = self._depth_cache_entry(int(frame_number), depth_path)
+            cache_key = cache_entry.cache_key if cache_entry is not None else None
+            cached = self._read_cached_depth_features(cache_key)
+            if cached is not None:
+                results[row_idx] = cached
+                continue
+
+            pending_tasks.append(
+                (
+                    str(depth_path),
+                    self.depth_crop_ratio,
+                    self.canopy_crop_ratio,
+                    self.clearance_percentile,
                 )
             )
+            pending_meta.append((row_idx, cache_entry))
 
-    def _depth_cache_key(self, frame_idx: int, depth_path: Path) -> str | None:
+        if pending_tasks:
+            try:
+                with ProcessPoolExecutor(max_workers=self.depth_workers) as executor:
+                    computed = list(executor.map(_depth_feature_worker, pending_tasks))
+            except (OSError, PermissionError):
+                computed = [_depth_feature_worker(task) for task in pending_tasks]
+            for (row_idx, cache_entry), value in zip(pending_meta, computed, strict=False):
+                results[row_idx] = value
+                self._write_cached_depth_features(cache_entry, value)
+            self._flush_depth_cache()
+
+        return results
+
+    def _compute_depth_params_hash(self) -> str:
+        parts = (
+            f"{self.depth_crop_ratio:.6f}",
+            f"{self.canopy_crop_ratio:.6f}",
+            f"{self.clearance_percentile:.6f}",
+        )
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _depth_cache_entry(self, frame_idx: int, depth_path: Path) -> _DepthCacheEntry | None:
         if self.depth_cache_dir is None:
             return None
         try:
@@ -313,60 +425,148 @@ class FeatureEngine:
             str(frame_idx),
             str(stat.st_mtime_ns),
             str(stat.st_size),
-            f"{self.depth_crop_ratio:.6f}",
-            f"{self.canopy_crop_ratio:.6f}",
-            f"{self.clearance_percentile:.6f}",
+            self._depth_params_hash,
         )
-        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+        return _DepthCacheEntry(
+            cache_key=hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest(),
+            frame_idx=frame_idx,
+            mtime_ns=int(stat.st_mtime_ns),
+            size_bytes=int(stat.st_size),
+            params_hash=self._depth_params_hash,
+        )
+
+    def _depth_cache_path(self) -> Path:
+        if self.depth_cache_dir is None:
+            raise ValueError("depth_cache_dir is not configured.")
+        return self.depth_cache_dir / DEFAULT_DEPTH_CACHE_FILENAME
+
+    def _ensure_depth_cache_loaded(self) -> None:
+        if self.depth_cache_dir is None or self._depth_cache_loaded:
+            return
+        self._depth_cache_loaded = True
+        cache_path = self._depth_cache_path()
+        if not cache_path.exists():
+            return
+
+        try:
+            cache_df = pd.read_parquet(cache_path)
+        except (OSError, ValueError, ImportError):
+            return
+
+        required_columns = {
+            "cache_key",
+            "frame_idx",
+            "min_clearance_m",
+            "canopy_density_proxy",
+            "mtime_ns",
+            "size_bytes",
+            "params_hash",
+        }
+        if not required_columns.issubset(cache_df.columns):
+            return
+
+        for row in cache_df.to_dict(orient="records"):
+            cache_key = str(row.get("cache_key", "")).strip()
+            if not cache_key:
+                continue
+
+            clearance = self._as_optional_float(row.get("min_clearance_m"))
+            canopy = self._as_optional_float(row.get("canopy_density_proxy"))
+            result = (
+                clearance if clearance is not None else float("nan"),
+                canopy if canopy is not None else float("nan"),
+            )
+            self._depth_feature_memory_cache[cache_key] = result
+            self._depth_cache_records[cache_key] = {
+                "cache_key": cache_key,
+                "frame_idx": int(row.get("frame_idx", -1)),
+                "min_clearance_m": clearance,
+                "canopy_density_proxy": canopy,
+                "mtime_ns": int(row.get("mtime_ns", 0)),
+                "size_bytes": int(row.get("size_bytes", 0)),
+                "params_hash": str(row.get("params_hash", "")),
+            }
 
     def _read_cached_depth_features(self, cache_key: str | None) -> tuple[float, float] | None:
         if self.depth_cache_dir is None or cache_key is None:
             return None
+        self._ensure_depth_cache_loaded()
         if cache_key in self._depth_feature_memory_cache:
             return self._depth_feature_memory_cache[cache_key]
-
-        cache_path = self.depth_cache_dir / f"{cache_key}.json"
-        if not cache_path.exists():
-            return None
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-            clearance = payload.get("min_clearance_m")
-            canopy = payload.get("canopy_density_proxy")
-            result = (
-                float(clearance) if clearance is not None else float("nan"),
-                float(canopy) if canopy is not None else float("nan"),
-            )
-            self._depth_feature_memory_cache[cache_key] = result
-            return result
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
+        return None
 
     def _write_cached_depth_features(
         self,
-        cache_key: str | None,
+        cache_entry: _DepthCacheEntry | None,
         result: tuple[float, float],
     ) -> None:
-        if self.depth_cache_dir is None or cache_key is None:
+        if self.depth_cache_dir is None or cache_entry is None:
             return
-        self._depth_feature_memory_cache[cache_key] = result
-        cache_path = self.depth_cache_dir / f"{cache_key}.json"
-        payload = {
-            "min_clearance_m": result[0] if np.isfinite(result[0]) else None,
-            "canopy_density_proxy": result[1] if np.isfinite(result[1]) else None,
+        self._ensure_depth_cache_loaded()
+        clearance = result[0] if np.isfinite(result[0]) else None
+        canopy = result[1] if np.isfinite(result[1]) else None
+        self._depth_feature_memory_cache[cache_entry.cache_key] = result
+        self._depth_cache_records[cache_entry.cache_key] = {
+            "cache_key": cache_entry.cache_key,
+            "frame_idx": cache_entry.frame_idx,
+            "min_clearance_m": clearance,
+            "canopy_density_proxy": canopy,
+            "mtime_ns": cache_entry.mtime_ns,
+            "size_bytes": cache_entry.size_bytes,
+            "params_hash": cache_entry.params_hash,
         }
+        self._depth_cache_dirty = True
+
+    def _flush_depth_cache(self) -> None:
+        if self.depth_cache_dir is None or not self._depth_cache_dirty:
+            return
+
+        cache_df = pd.DataFrame.from_records(
+            list(self._depth_cache_records.values()),
+            columns=[
+                "cache_key",
+                "frame_idx",
+                "min_clearance_m",
+                "canopy_density_proxy",
+                "mtime_ns",
+                "size_bytes",
+                "params_hash",
+            ],
+        )
         try:
             self.depth_cache_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(cache_path)
-        except OSError:
+            cache_path = self._depth_cache_path()
+            tmp_path = cache_path.with_suffix(".tmp.parquet")
+            cache_df.to_parquet(tmp_path, index=False)
+            try:
+                tmp_path.replace(cache_path)
+            except OSError:
+                cache_df.to_parquet(cache_path, index=False)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._depth_cache_dirty = False
+        except (OSError, ValueError, ImportError):
             return
+
+    @staticmethod
+    def _as_optional_float(value: object) -> float | None:
+        if value is None:
+            return None
+        if not isinstance(value, (int, float, str, bytes, bytearray)):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(parsed):
+            return None
+        return parsed
 
     def _upper_crop(self, image: np.ndarray) -> np.ndarray:
         """Crop the upper portion of the image (canopy region)."""
-        height, width = image.shape[:2]
-        crop_h = max(1, int(round(height * self.canopy_crop_ratio)))
-        return image[0:crop_h, :]
+        return _upper_crop_array(image, self.canopy_crop_ratio)
 
     # ------------------------------------------------------------------
     # Kept from Step 2 (unchanged)
@@ -415,14 +615,7 @@ class FeatureEngine:
         return self.loader.frames_dir / DEFAULT_DEPTH_SUBDIR / f"{frame_idx:04d}.png"
 
     def _center_crop(self, image: np.ndarray) -> np.ndarray:
-        height, width = image.shape[:2]
-        crop_h = max(1, int(round(height * self.depth_crop_ratio)))
-        crop_w = max(1, int(round(width * self.depth_crop_ratio)))
-        y0 = max((height - crop_h) // 2, 0)
-        x0 = max((width - crop_w) // 2, 0)
-        y1 = min(y0 + crop_h, height)
-        x1 = min(x0 + crop_w, width)
-        return image[y0:y1, x0:x1]
+        return _center_crop_array(image, self.depth_crop_ratio)
 
     @staticmethod
     def _as_bool(value: Any) -> bool:

@@ -7,7 +7,7 @@ from typing import Any, TextIO
 try:
     import structlog
 except ModuleNotFoundError:  # pragma: no cover - depends on environment setup
-    structlog = None  # type: ignore[assignment]
+    structlog = None
 
 
 def resolve_log_format(requested: str, stream: TextIO | None = None) -> str:
@@ -23,15 +23,22 @@ def resolve_log_format(requested: str, stream: TextIO | None = None) -> str:
     return "console" if getattr(out, "isatty", lambda: False)() else "json"
 
 
-def configure_logging(log_level: str, log_format: str, stream: TextIO | None = None) -> str:
+def configure_logging(
+    log_level: str | int,
+    log_format: str,
+    stream: TextIO | None = None,
+) -> str:
     effective_format = resolve_log_format(log_format, stream=stream)
-    raw_level = str(log_level).strip()
-    if raw_level.isdigit():
-        numeric_level = int(raw_level)
+    if isinstance(log_level, int):
+        numeric_level = log_level
     else:
-        numeric_level = logging.getLevelName(raw_level.upper())
-        if not isinstance(numeric_level, int):
-            raise ValueError(f"Invalid log level '{log_level}'.")
+        raw_level = str(log_level).strip()
+        if raw_level.isdigit():
+            numeric_level = int(raw_level)
+        else:
+            numeric_level = logging.getLevelName(raw_level.upper())
+            if not isinstance(numeric_level, int):
+                raise ValueError(f"Invalid log level '{log_level}'.")
 
     logging.basicConfig(level=numeric_level, format="%(message)s", force=True)
 

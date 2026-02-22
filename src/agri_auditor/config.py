@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ DEFAULT_GEMINI_TIMEOUT_SEC = 20.0
 DEFAULT_GEMINI_WORKERS = 4
 DEFAULT_GEMINI_RETRIES = 2
 DEFAULT_GEMINI_BACKOFF_MS = 250
+DEFAULT_GEMINI_JITTER_RATIO = 0.2
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_FORMAT = "auto"
 DEFAULT_DEPTH_WORKERS = 4
@@ -32,13 +32,14 @@ _VALID_REPORT_MODES = {"single", "split"}
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    log_level: str = DEFAULT_LOG_LEVEL
+    log_level: str | int = DEFAULT_LOG_LEVEL
     log_format: str = DEFAULT_LOG_FORMAT
     gemini_model: str = DEFAULT_GEMINI_MODEL
     gemini_timeout_sec: float = DEFAULT_GEMINI_TIMEOUT_SEC
     gemini_workers: int = DEFAULT_GEMINI_WORKERS
     gemini_retries: int = DEFAULT_GEMINI_RETRIES
     gemini_backoff_ms: int = DEFAULT_GEMINI_BACKOFF_MS
+    gemini_jitter_ratio: float = DEFAULT_GEMINI_JITTER_RATIO
     gemini_cache_dir: str | None = None
     depth_workers: int = DEFAULT_DEPTH_WORKERS
     depth_cache_dir: str | None = None
@@ -53,7 +54,7 @@ class RuntimeConfig:
     report_feature_columns: tuple[str, ...] = ()
 
 
-def normalize_log_level(value: str) -> str:
+def normalize_log_level(value: str) -> str | int:
     level = str(value).strip().upper()
     if level in _VALID_LOG_LEVELS:
         return level
@@ -71,7 +72,7 @@ def normalize_log_level(value: str) -> str:
         raise ValueError(
             f"Invalid AGRI_AUDITOR_LOG_LEVEL '{value}'. Numeric levels must be >= 0."
         )
-    return str(numeric)
+    return numeric
 
 
 def normalize_log_format(value: str) -> str:
@@ -185,6 +186,13 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         source.get("AGRI_AUDITOR_GEMINI_BACKOFF_MS", str(DEFAULT_GEMINI_BACKOFF_MS)),
         env_var="AGRI_AUDITOR_GEMINI_BACKOFF_MS",
     )
+    gemini_jitter_ratio = parse_non_negative_float(
+        source.get(
+            "AGRI_AUDITOR_GEMINI_JITTER_RATIO",
+            str(DEFAULT_GEMINI_JITTER_RATIO),
+        ),
+        env_var="AGRI_AUDITOR_GEMINI_JITTER_RATIO",
+    )
     gemini_cache_dir = parse_optional_dir(
         source.get("AGRI_AUDITOR_GEMINI_CACHE_DIR", ""),
         env_var="AGRI_AUDITOR_GEMINI_CACHE_DIR",
@@ -254,6 +262,7 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         gemini_workers=gemini_workers,
         gemini_retries=gemini_retries,
         gemini_backoff_ms=gemini_backoff_ms,
+        gemini_jitter_ratio=gemini_jitter_ratio,
         gemini_cache_dir=gemini_cache_dir,
         depth_workers=depth_workers,
         depth_cache_dir=depth_cache_dir,
