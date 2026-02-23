@@ -27,11 +27,18 @@ def _pythonpath_env() -> dict[str, str]:
     return env
 
 
-def _run_module(args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_module(
+    args: list[str],
+    *,
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = _pythonpath_env()
+    if env_overrides:
+        env.update(env_overrides)
     return subprocess.run(
         [sys.executable, "-m", "agri_auditor", *args],
         cwd=PROJECT_ROOT,
-        env=_pythonpath_env(),
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -123,6 +130,24 @@ def test_process_disable_gemini_completes_and_writes_outputs() -> None:
     assert assets_dir.exists()
     assert (assets_dir / "events.json").exists()
     assert (assets_dir / "telemetry.json").exists()
+
+
+def test_process_requires_gemini_key_when_not_disabled() -> None:
+    result = _run_module(
+        [
+            "process",
+            "--data-dir",
+            str(data_dir()),
+            "--top-k",
+            "1",
+            "--distance-frames",
+            "150",
+            "--no-surround",
+        ],
+        env_overrides={"GEMINI_API_KEY": ""},
+    )
+    assert result.returncode != 0
+    assert "GEMINI_API_KEY" in (result.stderr + result.stdout)
 
 
 def test_legacy_script_wrappers_forward_to_cli_help() -> None:

@@ -310,9 +310,10 @@ def _init_analyst(
             None,
         )
     except GeminiConfigError as exc:
-        reason = f"config_error: {exc}"
-        log_event(logger, "warning", "gemini_disabled", reason=reason)
-        return None, reason
+        raise RuntimeError(
+            "Gemini is required for this command unless --disable-gemini is set. "
+            f"{exc} Set GEMINI_API_KEY and rerun."
+        ) from exc
 
 
 def _cmd_features(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -> int:

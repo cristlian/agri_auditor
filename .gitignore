@@ -7,7 +7,12 @@ __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
 tmp*/
+.pytest-local/
+.pytest-tmp/
+.pytest_tmp_root/
 
 artifacts/
 write_probe.txt
 .env
+node_modules/
+workspace/

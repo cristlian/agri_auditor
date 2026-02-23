@@ -2,7 +2,7 @@
 
 Production-oriented CV/ML incident auditing pipeline for autonomous tractor mission logs.
 
-Agri Auditor ingests mission telemetry + camera/depth frames, computes physically grounded safety features, detects top incidents, optionally enriches incidents with Gemini captions, and renders a security-hardened interactive mission report.
+Agri Auditor ingests mission telemetry + camera/depth frames, computes physically grounded safety features, detects top incidents, enriches incidents with Gemini captions, and renders a security-hardened interactive mission report.
 
 ## Why This Exists
 
@@ -149,7 +149,25 @@ Required manifest fields include at least:
 python scripts/prepare_test_data.py --output-dir ../provided_data
 ```
 
-2. Run full pipeline without external AI dependency:
+2. Configure Gemini API key (required for primary end-to-end run):
+```powershell
+copy .env.example .env
+# then set GEMINI_API_KEY in .env or your shell environment
+```
+
+3. Run full pipeline (Gemini required):
+```powershell
+python -m agri_auditor process `
+  --data-dir ../provided_data `
+  --output-features artifacts/features.csv `
+  --output-events artifacts/events.json `
+  --output-report artifacts/audit_report.html `
+  --report-mode split `
+  --report-telemetry-downsample 2 `
+  --report-feature-columns "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps,min_clearance_m,severity_score"
+```
+
+4. Fallback demonstration mode only (Gemini disabled):
 ```powershell
 python -m agri_auditor process `
   --data-dir ../provided_data `
@@ -162,7 +180,7 @@ python -m agri_auditor process `
   --report-feature-columns "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps,min_clearance_m,severity_score"
 ```
 
-3. Open `artifacts/audit_report.html`.
+5. Open `artifacts/audit_report.html`.
 
 ## CLI Reference
 
@@ -247,7 +265,8 @@ Report rendering treats model output as untrusted input:
 Safety posture:
 
 1. Gemini is advisory only; it never controls decisions.
-2. Pipeline remains fully operational with `--disable-gemini`.
+2. Primary success path requires Gemini-enabled execution.
+3. `--disable-gemini` exists as an explicit fallback demonstration mode.
 
 ## Reliability and Performance
 
@@ -305,7 +324,7 @@ Deterministic lane (default):
 python -m pytest -q
 ```
 
-Live Gemini lane (requires secret + network):
+Live Gemini lane (required for validating primary path):
 
 ```powershell
 python -m pytest -q -m gemini_live -o addopts="-p no:cacheprovider"
@@ -359,6 +378,6 @@ Current state aligns with the completed upgrade portfolio:
 
 ## Known Constraints and Next Phase
 
-1. `gemini_live` tests require outbound network and valid `GEMINI_API_KEY`.
+1. Primary run requires outbound network access and valid `GEMINI_API_KEY`.
 2. Extremely long missions should prefer `--report-mode split`.
 3. Next planned platform extension (8.2): thin service orchestration layer for multi-run scheduling and artifact serving.
