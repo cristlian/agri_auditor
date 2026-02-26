@@ -1,7 +1,7 @@
-﻿# Agri Auditor
+# Agri Auditor
 
 **Post-mission safety auditing for autonomous tractor operations.**
-Deterministic CV/ML pipeline that transforms raw mission telemetry and surround-view camera feeds into ranked, explainable incident reports 鈥?with optional Gemini AI enrichment for field-level context.
+Deterministic CV/ML pipeline that transforms raw mission telemetry and surround-view camera feeds into ranked, explainable incident reports — with optional Gemini AI enrichment for field-level context.
 
 ---
 
@@ -9,7 +9,7 @@ Deterministic CV/ML pipeline that transforms raw mission telemetry and surround-
 
 Autonomous agricultural vehicles generate thousands of telemetry frames per mission across multiple IMU channels, GPS, 6-camera surround views, and stereo depth maps. Operators today lack a systematic, repeatable way to identify the highest-risk moments, understand root causes, and triage follow-up actions.
 
-Agri Auditor solves this by implementing a physics-grounded, five-signal severity scoring model that fuses terrain roughness, obstacle proximity, steering dynamics, sensor health, and localization confidence into a single composite score per frame. The system detects the statistically most significant incidents using constrained peak extraction, optionally enriches each with a Gemini vision caption, and renders an interactive mission dashboard 鈥?map, synced telemetry charts, signal decomposition, and surround-view galleries 鈥?in a single portable HTML file or scalable split-asset bundle.
+Agri Auditor solves this by implementing a physics-grounded, five-signal severity scoring model that fuses terrain roughness, obstacle proximity, steering dynamics, sensor health, and localization confidence into a single composite score per frame. The system detects the statistically most significant incidents using constrained peak extraction, optionally enriches each with a Gemini vision caption, and renders an interactive mission dashboard — map, synced telemetry charts, signal decomposition, and surround-view galleries — in a single portable HTML file or scalable split-asset bundle.
 
 The pipeline is fully deterministic offline, schema-validated, CI-gated, and containerized. It processes 1,085 frames with depth features in under 1 second cold, and under 40 ms warm-cached.
 
@@ -20,13 +20,13 @@ The pipeline is fully deterministic offline, schema-validated, CI-gated, and con
 | Capability | Implementation |
 |---|---|
 | **5-signal severity model** | Weighted composite: roughness (0.35), proximity (0.15), yaw rate (0.20), IMU fault (0.15), localization fault (0.15) |
-| **Robust normalization** | MAD-based z-score mapping (5th鈥?5th quantile clip, 卤3蟽 鈫?[0,1]) with automatic minmax fallback |
+| **Robust normalization** | MAD-based z-score mapping (5th–95th quantile clip, ±3σ → [0,1]) with automatic minmax fallback |
 | **Constrained peak detection** | `scipy.signal.find_peaks` with configurable prominence, width, and minimum inter-event distance |
 | **Multiprocess depth extraction** | `ProcessPoolExecutor` with Parquet-backed persistent cache and in-memory hot cache |
 | **Gemini AI enrichment** | SDK + REST dual path, exponential backoff with jitter, circuit breaker, SHA-256 deterministic cache |
 | **Interactive HTML dashboard** | Leaflet dark-tile map, 4-row synced Plotly telemetry panel, event cards with signal bars and surround-view gallery |
 | **Security-hardened rendering** | CSP nonce-restricted scripts, JSON payload isolation via `<script type="application/json">`, Jinja2 autoescape, `sanitize_model_text` |
-| **Production governance** | JSON Schema鈥搗alidated run metadata, CI lint/type/perf gates, DVC lineage stages, optional MLflow logging |
+| **Production governance** | JSON Schema–validated run metadata, CI lint/type/perf gates, DVC lineage stages, optional MLflow logging |
 
 ---
 
@@ -38,17 +38,40 @@ The pipeline is fully deterministic offline, schema-validated, CI-gated, and con
 
 ```text
 Mission Logs                          6-Camera Surround + Depth
-(manifest.csv, calibrations.json)     (1,085 frames 脳 7 streams)
-        鈹?                                      鈹?        鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                       鈻?              鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?              鈹?   LogLoader    鈹? Ingest manifest, calibrations,
-              鈹? ingestion.py   鈹? camera intrinsics, velocity derivation
-              鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                       鈻?              鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?              鈹? FeatureEngine  鈹? Roughness (high-pass RMS on dual IMU)
-              鈹?  features.py   鈹? Depth clearance + canopy proxy
-              鈹?                鈹? Quaternion 鈫?Euler orientation
-              鈹?                鈹? Rolling IMU cross-correlation
-              鈹?                鈹? GPS cleaning + pose confidence
-              鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                       鈻?              鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?              鈹? EventDetector  鈹? Normalize 鈫?weight 鈫?composite score
-              鈹?intelligence.py 鈹? Peak extraction 鈫?top-K candidates
-              鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                       鈹?          鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹粹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?          鈻?                        鈻? 鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?    鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹? 鈹?GeminiAnalyst    鈹?    鈹? ReportBuilder  鈹? 鈹?(optional)       鈹?    鈹? reporting.py   鈹? 鈹?SDK/REST + cache 鈹?    鈹?single 鈹?split  鈹? 鈹?circuit breaker  鈹?    鈹?Plotly + Leaflet鈹? 鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?    鈹?CSP hardened    鈹?          鈹?              鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?          鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                       鈻?            artifacts/features.csv
+(manifest.csv, calibrations.json)     (1,085 frames × 7 streams)
+        │                                       │
+        └──────────────┬────────────────────────┘
+                       ▼
+              ┌─────────────────┐
+              │    LogLoader    │  Ingest manifest, calibrations,
+              │  ingestion.py   │  camera intrinsics, velocity derivation
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │  FeatureEngine  │  Roughness (high-pass RMS on dual IMU)
+              │   features.py   │  Depth clearance + canopy proxy
+              │                 │  Quaternion → Euler orientation
+              │                 │  Rolling IMU cross-correlation
+              │                 │  GPS cleaning + pose confidence
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │  EventDetector  │  Normalize → weight → composite score
+              │ intelligence.py │  Peak extraction → top-K candidates
+              └────────┬────────┘
+                       │
+          ┌────────────┴────────────┐
+          ▼                         ▼
+ ┌──────────────────┐     ┌────────────────┐
+ │ GeminiAnalyst    │     │  ReportBuilder  │
+ │ (optional)       │     │  reporting.py   │
+ │ SDK/REST + cache │     │ single │ split  │
+ │ circuit breaker  │     │ Plotly + Leaflet│
+ └────────┬─────────┘     │ CSP hardened    │
+          │               └────────┬────────┘
+          └────────────┬───────────┘
+                       ▼
+            artifacts/features.csv
             artifacts/events.json
             artifacts/audit_report.html
             artifacts/*_assets/ (split mode)
@@ -66,11 +89,11 @@ $$S = 0.35 \cdot \hat{R} + 0.15 \cdot \hat{P} + 0.20 \cdot \hat{Y} + 0.15 \cdot 
 |---|---|---|
 | **Roughness** | $\hat{R}$ | High-pass RMS of dual-IMU accel-z (camera + syslogic), averaged, then normalized |
 | **Proximity** | $\hat{P}$ | $(10\text{m} - \text{clearance}) / (10\text{m} - \min)$, clipped [0, 1]. Clearance = 5th-percentile of center-crop depth |
-| **Yaw rate** | $\hat{Y}$ | Quaternion-derived yaw rate (deg/s) with 卤180掳 wraparound, abs-value normalized |
+| **Yaw rate** | $\hat{Y}$ | Quaternion-derived yaw rate (deg/s) with ±180° wraparound, abs-value normalized |
 | **IMU fault** | $\hat{I}$ | $1 - \text{normalize}(\text{rolling cross-correlation of camera vs syslogic accel-z})$ |
 | **Localization fault** | $\hat{L}$ | $1 - \text{normalize}(\text{pose\_confidence})$ |
 
-Default normalization is **robust**: values are clipped to the 5th鈥?5th percentile, a MAD-based robust sigma ($1.4826 \times \text{MAD}$) is computed, z-scores are clipped to [-3, 3] and mapped to [0, 1]. Falls back to minmax if the population is degenerate.
+Default normalization is **robust**: values are clipped to the 5th–95th percentile, a MAD-based robust sigma ($1.4826 \times \text{MAD}$) is computed, z-scores are clipped to [-3, 3] and mapped to [0, 1]. Falls back to minmax if the population is degenerate.
 
 Events are classified by dominant signal component: `roughness`, `proximity`, `steering`, `sensor_fault`, `localization_fault`, or `mixed` (when the top two components are within 0.1 of each other).
 
@@ -99,9 +122,9 @@ scripts/
 
 tests/                       108 deterministic tests + 3 live Gemini tests
 schemas/                     run_metadata.schema.json (JSON Schema 2020-12)
-.github/workflows/ci.yml    Lint 鈫?type check 鈫?schema 鈫?tests 鈫?perf gate 鈫?Gemini live
+.github/workflows/ci.yml    Lint → type check → schema → tests → perf gate → Gemini live
 Dockerfile                   Non-root Python 3.13-slim production image
-dvc.yaml                     Reproducible pipeline stages (features 鈫?events 鈫?report)
+dvc.yaml                     Reproducible pipeline stages (features → events → report)
 ```
 
 ---
@@ -179,7 +202,7 @@ python -m agri_auditor --help
 | `features` | Build feature table only | `--data-dir`, `--output` |
 | `events` | Build ranked event JSON | `--data-dir`, `--output`, `--top-k`, `--disable-gemini` |
 | `report` | Render dashboard from precomputed events | `--events-json`, `--report-mode single\|split` |
-| `process` | End-to-end: features 鈫?events 鈫?report | All of the above |
+| `process` | End-to-end: features → events → report | All of the above |
 | `benchmark-gemini` | Latency/throughput benchmark across models | `--models`, `--repeats`, `--events-json` |
 
 **Compose individual stages or run the full pipeline.** Precomputed artifacts are accepted at each stage boundary, enabling cache reuse and partial reruns.
@@ -205,7 +228,7 @@ Default dataset path: `../provided_data` relative to repo root.
 
 ```text
 provided_data/
-  manifest.csv          1,085 rows 脳 29 columns (IMU, GPS, pose, depth flags)
+  manifest.csv          1,085 rows × 29 columns (IMU, GPS, pose, depth flags)
   calibrations.json     Per-camera intrinsic parameters (fx, fy, cx, cy, resolution)
   frames/
     front_center_stereo_left/   1,085 JPEG frames
@@ -223,20 +246,20 @@ Required manifest columns: `frame_idx`, `timestamp_sec`, `pose_front_center_ster
 
 ## Runtime Configuration
 
-Configuration precedence: **CLI flags 鈫?environment variables 鈫?defaults**.
+Configuration precedence: **CLI flags → environment variables → defaults**.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | 鈥?| Enables live Gemini vision calls |
+| `GEMINI_API_KEY` | — | Enables live Gemini vision calls |
 | `AGRI_AUDITOR_GEMINI_MODEL` | `gemini-3-flash-preview` | Model identifier |
 | `AGRI_AUDITOR_GEMINI_TIMEOUT_SEC` | `20.0` | Per-call SLA timeout (seconds) |
 | `AGRI_AUDITOR_GEMINI_WORKERS` | `4` | Parallel caption workers |
 | `AGRI_AUDITOR_GEMINI_RETRIES` | `2` | Retry attempts per call |
 | `AGRI_AUDITOR_GEMINI_BACKOFF_MS` | `250` | Exponential backoff base (ms) |
 | `AGRI_AUDITOR_GEMINI_JITTER_RATIO` | `0.2` | Backoff jitter ratio |
-| `AGRI_AUDITOR_GEMINI_CACHE_DIR` | 鈥?| Deterministic on-disk caption cache |
+| `AGRI_AUDITOR_GEMINI_CACHE_DIR` | — | Deterministic on-disk caption cache |
 | `AGRI_AUDITOR_DEPTH_WORKERS` | `4` | Multiprocess depth extraction workers |
-| `AGRI_AUDITOR_DEPTH_CACHE_DIR` | 鈥?| Parquet-backed depth feature cache |
+| `AGRI_AUDITOR_DEPTH_CACHE_DIR` | — | Parquet-backed depth feature cache |
 | `AGRI_AUDITOR_SCORE_NORMALIZATION` | `robust` | `robust` (MAD-based) or `minmax` |
 | `AGRI_AUDITOR_SCORE_Q_LOW` | `0.05` | Robust quantile low bound |
 | `AGRI_AUDITOR_SCORE_Q_HIGH` | `0.95` | Robust quantile high bound |
@@ -245,10 +268,10 @@ Configuration precedence: **CLI flags 鈫?environment variables 鈫?defaults**.
 | `AGRI_AUDITOR_PEAK_MIN_DISTANCE` | `150` | Minimum frames between events |
 | `AGRI_AUDITOR_REPORT_MODE` | `single` | `single` (portable) or `split` (scalable) |
 | `AGRI_AUDITOR_REPORT_TELEMETRY_DOWNSAMPLE` | `1` | Downsample factor for report payload |
-| `AGRI_AUDITOR_REPORT_FEATURE_COLUMNS` | 鈥?| CSV list of columns to embed in report |
+| `AGRI_AUDITOR_REPORT_FEATURE_COLUMNS` | — | CSV list of columns to embed in report |
 | `AGRI_AUDITOR_LOG_LEVEL` | `INFO` | Named or numeric log level |
 | `AGRI_AUDITOR_LOG_FORMAT` | `auto` | `auto`, `json`, or `console` |
-| `AGRI_AUDITOR_MLFLOW_ENABLED` | 鈥?| Enable MLflow run lineage |
+| `AGRI_AUDITOR_MLFLOW_ENABLED` | — | Enable MLflow run lineage |
 | `AGRI_AUDITOR_MLFLOW_TRACKING_URI` | `artifacts/mlruns` | MLflow tracking URI |
 
 ---
@@ -261,7 +284,7 @@ Measured on the reference 1,085-frame dataset with depth extraction, single work
 |---|---|
 | Cold feature build | **0.90 s** |
 | Warm feature build (Parquet cache hit) | **0.03 s** |
-| Warm/cold ratio | **0.04** (26脳 speedup) |
+| Warm/cold ratio | **0.04** (26× speedup) |
 | Performance budget ceiling | 20.0 s cold, 0.95 warm/cold ratio |
 | Row-count parity | Cold = Warm = 1,085 rows |
 
@@ -273,12 +296,12 @@ The `ProcessPoolExecutor` depth path scales linearly with `--depth-workers` for 
 
 All model-generated text is treated as **untrusted input**:
 
-1. **Sanitization** 鈥?`sanitize_model_text()` strips control characters, normalizes whitespace, and enforces a 600-character cap before any template binding.
-2. **Payload isolation** 鈥?Data is embedded in `<script type="application/json">` blocks and bootstrapped via `JSON.parse(textContent)`. No inline JavaScript data variables.
-3. **CSP enforcement** 鈥?Report template applies a Content Security Policy with nonce-restricted `<script>` execution and locked-down `object`, `frame`, and `base-uri` directives.
-4. **Autoescape** 鈥?Jinja2 rendering has autoescaping enabled globally.
+1. **Sanitization** — `sanitize_model_text()` strips control characters, normalizes whitespace, and enforces a 600-character cap before any template binding.
+2. **Payload isolation** — Data is embedded in `<script type="application/json">` blocks and bootstrapped via `JSON.parse(textContent)`. No inline JavaScript data variables.
+3. **CSP enforcement** — Report template applies a Content Security Policy with nonce-restricted `<script>` execution and locked-down `object`, `frame`, and `base-uri` directives.
+4. **Autoescape** — Jinja2 rendering has autoescaping enabled globally.
 
-Gemini is **advisory only** 鈥?captions are displayed for operator context but never influence scoring, ranking, or pipeline control flow.
+Gemini is **advisory only** — captions are displayed for operator context but never influence scoring, ranking, or pipeline control flow.
 
 ---
 
@@ -287,7 +310,7 @@ Gemini is **advisory only** 鈥?captions are displayed for operator context but 
 | Control | Implementation |
 |---|---|
 | Dual provider path | Google GenAI SDK primary, raw REST (`urllib.request`) fallback |
-| Exponential backoff | Base 250 ms 脳 2^attempt, with 卤20% uniform jitter |
+| Exponential backoff | Base 250 ms × 2^attempt, with ±20% uniform jitter |
 | Per-call timeout | SDK calls wrapped in `ThreadPoolExecutor` with configurable SLA |
 | Circuit breaker | Opens after 3 consecutive failures, 30 s cooldown |
 | Deterministic cache | SHA-256 key over (model + system prompt + MIME type + temperature + thinking level + max words + image bytes), stored as JSON |
@@ -304,7 +327,7 @@ Gemini is **advisory only** 鈥?captions are displayed for operator context but 
 ```powershell
 # Full deterministic suite
 python -m pytest -q
-# 鈫?108 passed, 3 deselected
+# → 108 passed, 3 deselected
 
 # Live Gemini integration (requires API key)
 python -m pytest -q -m gemini_live -o addopts="-p no:cacheprovider"
@@ -340,14 +363,14 @@ Test coverage spans: ingestion loading, feature math, normalization edge cases, 
 
 **CI pipeline** (`.github/workflows/ci.yml`):
 
-1. `ruff check .` 鈥?lint gate
-2. `mypy src` 鈥?static type check
-3. Schema validation 鈥?`tests/test_run_metadata_schema.py`
-4. Full deterministic test suite 鈥?`pytest -q`
-5. Performance budget gate 鈥?`scripts/check_perf_budget.py`
-6. Live Gemini suite 鈥?conditional on `GEMINI_API_KEY` secret
+1. `ruff check .` — lint gate
+2. `mypy src` — static type check
+3. Schema validation — `tests/test_run_metadata_schema.py`
+4. Full deterministic test suite — `pytest -q`
+5. Performance budget gate — `scripts/check_perf_budget.py`
+6. Live Gemini suite — conditional on `GEMINI_API_KEY` secret
 
-**Reproducibility**: `dvc.yaml` defines three stages (`features` 鈫?`events` 鈫?`report`) with explicit dependency tracking and artifact outputs. Optional MLflow lineage via `src/agri_auditor/mlops.py` is fire-and-forget 鈥?it never blocks the pipeline on logging failures.
+**Reproducibility**: `dvc.yaml` defines three stages (`features` → `events` → `report`) with explicit dependency tracking and artifact outputs. Optional MLflow lineage via `src/agri_auditor/mlops.py` is fire-and-forget — it never blocks the pipeline on logging failures.
 
 ---
 
@@ -387,4 +410,3 @@ Execution contract: [docs/cto_upgrade_completion_handoff.md](docs/cto_upgrade_co
 ## License
 
 Internal / proprietary. See project governance documentation for access and contribution policies.
-
