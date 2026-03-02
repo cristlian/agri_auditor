@@ -9,6 +9,10 @@ import uuid
 
 import pandas as pd
 
+from agri_auditor.cli import _backfill_event_camera_paths
+from agri_auditor.ingestion import LogLoader
+from agri_auditor.intelligence import Event, UNAVAILABLE_CAPTION
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -189,3 +193,44 @@ def test_prepare_test_data_script_creates_required_files() -> None:
     assert (tmp_dir / "calibrations.json").exists()
     assert (tmp_dir / "frames" / "front_center_stereo_left" / "0000.jpg").exists()
     assert (tmp_dir / "frames" / "depth" / "0000.png").exists()
+
+
+def test_backfill_event_camera_paths_recovers_surround_views() -> None:
+    loader = LogLoader(data_dir())
+    single_path_event = Event(
+        event_rank=1,
+        frame_idx=10,
+        timestamp_sec=1_768_474_273.0,
+        timestamp_iso_utc="2026-01-15T10:51:13+00:00",
+        severity_score=0.5,
+        roughness=0.3,
+        min_clearance_m=3.2,
+        yaw_rate=1.0,
+        imu_correlation=0.1,
+        pose_confidence=55.0,
+        roughness_norm=0.3,
+        proximity_norm=0.4,
+        yaw_rate_norm=0.2,
+        imu_fault_norm=0.1,
+        localization_fault_norm=0.2,
+        event_type="mixed",
+        gps_lat=39.661,
+        gps_lon=-0.558,
+        primary_camera="front_center_stereo_left",
+        camera_paths={
+            "front_center_stereo_left": str(
+                data_dir() / "frames" / "front_center_stereo_left" / "0010.jpg"
+            )
+        },
+        gemini_caption=UNAVAILABLE_CAPTION,
+        gemini_model=None,
+        gemini_source="unavailable",
+        gemini_latency_ms=None,
+    )
+
+    repaired_events, repaired_count = _backfill_event_camera_paths(
+        [single_path_event], loader
+    )
+    assert repaired_count == 1
+    assert len(repaired_events) == 1
+    assert len(repaired_events[0].camera_paths) >= 2

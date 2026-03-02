@@ -20,6 +20,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -335,7 +336,7 @@ class ReportBuilder:
         if self.report_mode == "split":
             asset_paths = self._write_split_assets(out, payload)
         out.write_text(
-            self._render(payload=payload, asset_paths=asset_paths),
+            self._render(payload=payload, asset_paths=asset_paths, output_path=out),
             encoding="utf-8",
         )
         return out
@@ -347,10 +348,20 @@ class ReportBuilder:
         *,
         payload: dict[str, Any] | None = None,
         asset_paths: dict[str, str] | None = None,
+        output_path: Path | None = None,
     ) -> str:
         bundle = payload if payload is not None else self._build_payload()
         resolved_assets = asset_paths or {}
         inline_payload = self._inline_payload_blocks(bundle)
+        primary_camera = (
+            self.events[0].primary_camera
+            if self.events and self.events[0].primary_camera
+            else "front_center_stereo_left"
+        )
+        frame_image_root = self._frame_image_root(
+            output_path=output_path,
+            primary_camera=primary_camera,
+        )
 
         csp_nonce = secrets.token_urlsafe(18)
         ctx: dict[str, Any] = {
@@ -365,6 +376,9 @@ class ReportBuilder:
                 "run_id": self.metadata.get("run_id", "audit-run"),
                 "report_mode": self.report_mode,
                 "data_assets": resolved_assets,
+                "primary_camera": primary_camera,
+                "frame_image_root": frame_image_root,
+                "frame_image_exts": [".jpg", ".png", ".jpeg"],
             },
             "payload_events": inline_payload["events"],
             "payload_gps_path": inline_payload["gps_path"],
@@ -391,29 +405,32 @@ class ReportBuilder:
     def _inline_payload_blocks(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.report_mode != "split":
             return payload
-        minimal_events = [
-            {
-                "rank": event.get("rank"),
-                "frame_idx": event.get("frame_idx"),
-                "elapsed": event.get("elapsed"),
-                "event_type": event.get("event_type"),
-                "severity": event.get("severity"),
-                "severity_label": event.get("severity_label"),
-                "severity_color": event.get("severity_color"),
-                "gps_lat": event.get("gps_lat"),
-                "gps_lon": event.get("gps_lon"),
-                "primary_image": event.get("primary_image"),
-            }
-            for event in payload.get("events", [])
-        ]
         # Split reports still need a complete inline fallback because browsers often block
         # fetch() for sibling JSON assets when the HTML is opened via file://.
         return {
-            "events": minimal_events,
+            "events": payload.get("events", []),
             "gps_path": payload.get("gps_path", []),
             "features": payload.get("features", []),
             "telemetry": payload.get("telemetry", {"data": [], "layout": {}}),
         }
+
+    def _frame_image_root(
+        self,
+        *,
+        output_path: Path | None,
+        primary_camera: str,
+    ) -> str | None:
+        if output_path is None:
+            return None
+        frame_dir = self.loader.frames_dir / primary_camera
+        try:
+            return os.path.relpath(frame_dir, output_path.parent).replace("\\", "/")
+        except ValueError:
+            pass
+        try:
+            return frame_dir.as_uri()
+        except ValueError:
+            return str(frame_dir).replace("\\", "/")
 
     def _write_split_assets(
         self,
@@ -600,7 +617,7 @@ class ReportBuilder:
 
         # Row 1: Severity
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=x, y=sev, mode="lines", name="Severity",
                 line=dict(color=COLORS["amber"], width=1),
                 fill="tozeroy", fillcolor="rgba(255,215,64,0.15)",
@@ -640,7 +657,7 @@ class ReportBuilder:
 
         # Row 2: Velocity
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=x,
                 y=pd.to_numeric(df.get("velocity_mps"), errors="coerce"),
                 mode="lines", name="Velocity",
@@ -667,7 +684,7 @@ class ReportBuilder:
 
         # Row 3: Pitch + Roll
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=x,
                 y=pd.to_numeric(df.get("pitch"), errors="coerce"),
                 mode="lines", name="Pitch",
@@ -676,7 +693,7 @@ class ReportBuilder:
             ), row=3, col=1,
         )
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=x,
                 y=pd.to_numeric(df.get("roll"), errors="coerce"),
                 mode="lines", name="Roll",
@@ -687,7 +704,7 @@ class ReportBuilder:
 
         # Row 4: Clearance
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=x,
                 y=pd.to_numeric(df.get("min_clearance_m"), errors="coerce"),
                 mode="lines", name="Clearance",
@@ -1242,10 +1259,10 @@ body{
         <div class="evm-ai">"{{ ev.gemini_caption }}"</div>
         {% endif %}
         <div class="evm-triage">
-          <button class="tri-btn tri-ok" onclick="triageEvent({{ event_idx }},'accurate',this)">&#10003; Accurate</button>
-          <button class="tri-btn tri-fp" onclick="triageEvent({{ event_idx }},'false_positive',this)">&#10007; False Positive</button>
-          <button class="tri-btn tri-rt" onclick="triageEvent({{ event_idx }},'retrain',this)">&#8635; Retrain</button>
-          <button class="tri-btn" onclick="downloadCSV({{ event_idx }})">&darr; CSV</button>
+          <button class="tri-btn tri-ok" data-triage-action="accurate" data-event-idx="{{ event_idx }}">&#10003; Accurate</button>
+          <button class="tri-btn tri-fp" data-triage-action="false_positive" data-event-idx="{{ event_idx }}">&#10007; False Positive</button>
+          <button class="tri-btn tri-rt" data-triage-action="retrain" data-event-idx="{{ event_idx }}">&#8635; Retrain</button>
+          <button class="tri-btn" data-download-csv="1" data-event-idx="{{ event_idx }}">&darr; CSV</button>
         </div>
       </div>
       {% endfor %}
@@ -1297,6 +1314,15 @@ body{
   var DATA_ASSETS = META && typeof META.data_assets === 'object' && META.data_assets
     ? META.data_assets
     : {};
+  var PRIMARY_CAMERA = (META && typeof META.primary_camera === 'string' && META.primary_camera)
+    ? META.primary_camera
+    : 'front_center_stereo_left';
+  var FRAME_IMAGE_ROOT = (META && typeof META.frame_image_root === 'string' && META.frame_image_root)
+    ? META.frame_image_root
+    : '';
+  var FRAME_IMAGE_EXTS = (META && Array.isArray(META.frame_image_exts) && META.frame_image_exts.length > 0)
+    ? META.frame_image_exts
+    : ['.jpg', '.png', '.jpeg'];
 
   function ensurePayloadShape(payload) {
     var normalized = payload && typeof payload === 'object' ? payload : {};
@@ -1392,8 +1418,50 @@ body{
 
   applyEventImages(EVENTS);
   var currentFrameImg = document.getElementById('current-frame-img');
-  if (currentFrameImg && EVENTS.length > 0 && EVENTS[0].primary_image) {
-    currentFrameImg.src = EVENTS[0].primary_image;
+
+  function normalizePathPrefix(prefix) {
+    if (!prefix) return '';
+    return prefix.replace(/\\/g, '/').replace(/\/+$/, '');
+  }
+
+  function buildFrameImageCandidates(frameIdx) {
+    if (!FRAME_IMAGE_ROOT || frameIdx == null) return [];
+    var parsed = parseInt(frameIdx, 10);
+    if (!Number.isFinite(parsed)) return [];
+    var stem = String(Math.max(0, parsed)).padStart(4, '0');
+    var base = normalizePathPrefix(FRAME_IMAGE_ROOT) + '/' + stem;
+    return FRAME_IMAGE_EXTS.map(function(ext) {
+      return base + String(ext || '.jpg');
+    });
+  }
+
+  function setCurrentFrameImage(frameIdx, fallbackSrc) {
+    if (!currentFrameImg) return;
+    var candidates = buildFrameImageCandidates(frameIdx);
+    if (!candidates.length) {
+      if (fallbackSrc) currentFrameImg.src = fallbackSrc;
+      return;
+    }
+    var tryIdx = 0;
+    currentFrameImg.onerror = function() {
+      tryIdx += 1;
+      if (tryIdx < candidates.length) {
+        currentFrameImg.src = candidates[tryIdx];
+      } else {
+        currentFrameImg.onerror = null;
+        if (fallbackSrc) currentFrameImg.src = fallbackSrc;
+      }
+    };
+    currentFrameImg.src = candidates[0];
+  }
+
+  if (currentFrameImg) {
+    var firstFeature = FEATURES.length > 0 ? FEATURES[0] : null;
+    var firstEvent = EVENTS.length > 0 ? EVENTS[0] : null;
+    setCurrentFrameImage(
+      firstFeature ? firstFeature.frame_idx : null,
+      firstEvent ? firstEvent.primary_image : null
+    );
   }
 
   /* 鈹€鈹€ Split.js Layout 鈹€鈹€ */
@@ -1678,9 +1746,10 @@ body{
     if (EVENTS.length > 0) {
       var nearestEventIdx = nearestIndex(EVENT_TIMES, t);
       var nearestEv = nearestEventIdx >= 0 ? EVENTS[nearestEventIdx] : null;
-      if (currentFrameImg && nearestEv) {
-        currentFrameImg.src = nearestEv.primary_image;
-      }
+      setCurrentFrameImage(
+        nearestRow ? nearestRow.frame_idx : null,
+        nearestEv ? nearestEv.primary_image : null
+      );
     }
   });
 
@@ -1812,9 +1881,32 @@ body{
     var a = document.createElement('a');
     a.href = url;
     a.download = 'event_' + ev.rank + '_telemetry.csv';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
   };
+
+  document.querySelectorAll('.evm-triage .tri-btn[data-triage-action]').forEach(function(btn){
+    btn.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      var idx = parseInt(btn.getAttribute('data-event-idx') || '-1', 10);
+      var action = btn.getAttribute('data-triage-action');
+      if (idx < 0 || !action) return;
+      window.triageEvent(idx, action, btn);
+    });
+  });
+
+  document.querySelectorAll('.evm-triage .tri-btn[data-download-csv]').forEach(function(btn){
+    btn.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      var idx = parseInt(btn.getAttribute('data-event-idx') || '-1', 10);
+      if (idx < 0) return;
+      window.downloadCSV(idx);
+    });
+  });
 
   function showToast(msg, color){
     var t = document.getElementById('toast');

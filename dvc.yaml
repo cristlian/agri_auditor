@@ -20,7 +20,7 @@ stages:
     outs:
       - artifacts/events.json
   report:
-    cmd: python -m agri_auditor report --data-dir ../provided_data --features-csv artifacts/features.csv --events-json artifacts/events.json --output artifacts/audit_report.html --report-mode split --no-surround
+    cmd: python -m agri_auditor report --data-dir ../provided_data --events-json artifacts/events.json --output artifacts/audit_report.html --report-mode split
     deps:
       - src/agri_auditor/cli.py
       - src/agri_auditor/reporting.py

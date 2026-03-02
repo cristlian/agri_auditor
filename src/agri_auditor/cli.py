@@ -263,6 +263,61 @@ def _load_events_from_json(json_path: Path) -> list[Event]:
     return events
 
 
+def _backfill_event_camera_paths(
+    events: list[Event],
+    loader: LogLoader,
+) -> tuple[list[Event], int]:
+    """Recover missing surround camera paths for legacy events.json payloads."""
+    camera_names: list[str] = []
+    try:
+        for entry in loader.frames_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name in {"depth", "depth_viz"}:
+                continue
+            camera_names.append(entry.name)
+    except OSError:
+        return events, 0
+
+    if not camera_names:
+        return events, 0
+
+    normalized: list[Event] = []
+    repaired_count = 0
+    for event in events:
+        if isinstance(event.camera_paths, dict) and len(event.camera_paths) > 1:
+            normalized.append(event)
+            continue
+
+        resolved: dict[str, str] = {}
+        for camera_name in camera_names:
+            image_path = _resolve_image_path(
+                loader=loader,
+                camera_name=camera_name,
+                frame_idx=event.frame_idx,
+            )
+            if image_path.exists():
+                resolved[camera_name] = str(image_path)
+
+        if not resolved:
+            normalized.append(event)
+            continue
+
+        primary_camera = (
+            event.primary_camera if event.primary_camera in resolved else next(iter(resolved))
+        )
+        normalized.append(
+            replace(
+                event,
+                primary_camera=primary_camera,
+                camera_paths=resolved,
+            )
+        )
+        repaired_count += 1
+
+    return normalized, repaired_count
+
+
 def _resolve_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     runtime = load_runtime_config()
     if getattr(args, "log_level", None):
@@ -453,6 +508,7 @@ def _cmd_report(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
     if args.events_json is not None:
         events_json_path = _resolve_path(args.events_json)
         events = _load_events_from_json(events_json_path)
+        events, repaired_count = _backfill_event_camera_paths(events, loader)
         log_event(
             logger,
             "info",
@@ -460,6 +516,7 @@ def _cmd_report(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) -
             run_id=args.run_id,
             events_json=str(events_json_path),
             events_loaded=int(len(events)),
+            camera_paths_repaired=int(repaired_count),
         )
     else:
         analyst, _ = _init_analyst(

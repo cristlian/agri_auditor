@@ -254,6 +254,12 @@ class TestReportBuilder:
         # Should have velocity + pitch + roll + clearance + event markers
         assert len(parsed["data"]) >= 4
 
+    def test_chart_telemetry_avoids_webgl_trace_types(self, builder):
+        fig = builder._chart_telemetry()
+        parsed = json.loads(fig.to_json())
+        trace_types = {str(trace.get("type", "")).lower() for trace in parsed["data"]}
+        assert "scattergl" not in trace_types
+
     def test_gps_path_data_returns_list(self, builder):
         path = builder._gps_path_data()
         assert isinstance(path, list)
@@ -344,6 +350,23 @@ class TestReportBuilder:
         html = builder._render()
         assert "plotly" in html.lower()
         assert "Plotly.newPlot" in html
+
+    def test_render_scrubber_prefers_nearest_frame_image(self, builder):
+        html = builder._render()
+        assert "function setCurrentFrameImage(frameIdx, fallbackSrc)" in html
+        assert "nearestRow ? nearestRow.frame_idx : null" in html
+        assert "nearestEv ? nearestEv.primary_image : null" in html
+
+    def test_render_triage_and_csv_buttons_are_csp_safe(self, builder):
+        html = builder._render()
+        assert 'onclick="triageEvent(' not in html
+        assert 'onclick="downloadCSV(' not in html
+        assert 'data-triage-action="accurate"' in html
+        assert 'data-triage-action="false_positive"' in html
+        assert 'data-triage-action="retrain"' in html
+        assert 'data-download-csv="1"' in html
+        assert "document.querySelectorAll('.evm-triage .tri-btn[data-triage-action]')" in html
+        assert "document.querySelectorAll('.evm-triage .tri-btn[data-download-csv]')" in html
 
     def test_save_report_writes_file(self, builder):
         tmpdir = _new_workspace_tmp_dir()
@@ -486,23 +509,32 @@ class TestReportBuilder:
             features_df=_make_features_df(),
             events=_make_events(),
             metadata={"run_id": "split-inline-fallback-test"},
-            include_surround=False,
+            include_surround=True,
             report_mode="split",
         )
         tmpdir = _new_workspace_tmp_dir()
         out = builder.save_report(tmpdir / "split_inline_fallback_report.html")
         content = out.read_text(encoding="utf-8")
 
+        events = _extract_json_script(content, "payload-events")
         gps_path = _extract_json_script(content, "payload-gps-path")
         features = _extract_json_script(content, "payload-features")
         telemetry = _extract_json_script(content, "payload-telemetry")
+        meta = _extract_json_script(content, "payload-meta")
 
+        assert isinstance(events, list)
+        assert len(events) > 0
+        assert isinstance(events[0].get("surround"), dict)
+        assert len(events[0]["surround"]) > 0
         assert isinstance(gps_path, list)
         assert len(gps_path) > 0
         assert isinstance(features, list)
         assert len(features) > 0
         assert isinstance(telemetry, dict)
         assert len(telemetry.get("data", [])) > 0
+        assert isinstance(meta, dict)
+        assert meta.get("frame_image_root")
+        assert meta.get("primary_camera")
 
     def test_split_html_is_smaller_than_single_html(self):
         single = ReportBuilder(
