@@ -845,7 +845,8 @@ class ReportBuilder:
             "has_ai": has_ai,
             "primary_image": primary_b64 or _PLACEHOLDER_IMAGE,
             "primary_camera": ev.primary_camera,
-            "surround": surround if surround else None,
+            # Keep payload shape stable for split/single runtimes and tests.
+            "surround": surround,
             "gps_lat": ev.gps_lat,
             "gps_lon": ev.gps_lon,
             "velocity_at_event": float(vel_val),
