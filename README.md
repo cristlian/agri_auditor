@@ -155,10 +155,11 @@ Report extras: `plotly`, `jinja2`.
 
 ## Quickstart
 
-**1. Open PowerShell at repo root:**
+**1. Clone the repo and open it:**
 
 ```powershell
-cd "d:\IC\求职\面试\Voltrac\Take home assessment\agri_auditor"
+git clone https://github.com/cristlian/agri_auditor.git
+cd agri_auditor
 ```
 
 **2. Prepare dataset** (synthetic deterministic data, if you don't have real mission data):
