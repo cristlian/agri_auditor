@@ -42,6 +42,16 @@ def _new_workspace_tmp_dir() -> Path:
     return path
 
 
+def _extract_json_script(html: str, script_id: str) -> object:
+    marker = f'<script id="{script_id}" type="application/json">'
+    start = html.find(marker)
+    assert start != -1
+    start += len(marker)
+    end = html.find("</script>", start)
+    assert end != -1
+    return json.loads(html[start:end])
+
+
 def _make_features_df(n: int = 100) -> pd.DataFrame:
     """Generate a synthetic features DataFrame for testing."""
     rng = np.random.default_rng(42)
@@ -469,6 +479,30 @@ class TestReportBuilder:
         assert 'id="payload-events"' in content
         assert "applyEventImages(EVENTS);" in content
         assert 'src="data:image' not in content
+
+    def test_split_mode_embeds_non_empty_inline_fallback_payloads(self):
+        builder = ReportBuilder(
+            loader=_mock_loader(),
+            features_df=_make_features_df(),
+            events=_make_events(),
+            metadata={"run_id": "split-inline-fallback-test"},
+            include_surround=False,
+            report_mode="split",
+        )
+        tmpdir = _new_workspace_tmp_dir()
+        out = builder.save_report(tmpdir / "split_inline_fallback_report.html")
+        content = out.read_text(encoding="utf-8")
+
+        gps_path = _extract_json_script(content, "payload-gps-path")
+        features = _extract_json_script(content, "payload-features")
+        telemetry = _extract_json_script(content, "payload-telemetry")
+
+        assert isinstance(gps_path, list)
+        assert len(gps_path) > 0
+        assert isinstance(features, list)
+        assert len(features) > 0
+        assert isinstance(telemetry, dict)
+        assert len(telemetry.get("data", [])) > 0
 
     def test_split_html_is_smaller_than_single_html(self):
         single = ReportBuilder(

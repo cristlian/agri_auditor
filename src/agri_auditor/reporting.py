@@ -406,11 +406,13 @@ class ReportBuilder:
             }
             for event in payload.get("events", [])
         ]
+        # Split reports still need a complete inline fallback because browsers often block
+        # fetch() for sibling JSON assets when the HTML is opened via file://.
         return {
             "events": minimal_events,
-            "gps_path": [],
-            "features": [],
-            "telemetry": {"data": [], "layout": {}},
+            "gps_path": payload.get("gps_path", []),
+            "features": payload.get("features", []),
+            "telemetry": payload.get("telemetry", {"data": [], "layout": {}}),
         }
 
     def _write_split_assets(
