@@ -71,10 +71,10 @@ Mission Logs                          6-Camera Surround + Depth
           │               └────────┬────────┘
           └────────────┬───────────┘
                        ▼
-            artifacts/features.csv
-            artifacts/events.json
-            artifacts/audit_report.html
-            artifacts/*_assets/ (split mode)
+            workspace/pipeline_outputs/features.csv
+            workspace/pipeline_outputs/events.json
+            workspace/pipeline_outputs/audit_report.html
+            workspace/pipeline_outputs/*_assets/ (split mode)
 ```
 
 ---
@@ -167,9 +167,9 @@ $env:GEMINI_API_KEY = "your-key-here"
 
 python -m agri_auditor process `
   --data-dir ../provided_data `
-  --output-features artifacts/features.csv `
-  --output-events artifacts/events.json `
-  --output-report artifacts/audit_report.html `
+  --output-features workspace/pipeline_outputs/features.csv `
+  --output-events workspace/pipeline_outputs/events.json `
+  --output-report workspace/pipeline_outputs/audit_report.html `
   --report-mode split `
   --report-telemetry-downsample 2 `
   --report-feature-columns "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps,min_clearance_m,severity_score"
@@ -180,14 +180,14 @@ python -m agri_auditor process `
 ```powershell
 python -m agri_auditor process `
   --data-dir ../provided_data `
-  --output-features artifacts/features.csv `
-  --output-events artifacts/events.json `
-  --output-report artifacts/audit_report.html `
+  --output-features workspace/pipeline_outputs/features.csv `
+  --output-events workspace/pipeline_outputs/events.json `
+  --output-report workspace/pipeline_outputs/audit_report.html `
   --disable-gemini `
   --report-mode split
 ```
 
-**4. Open** `artifacts/audit_report.html` in any browser.
+**4. Open** `workspace/pipeline_outputs/audit_report.html` in any browser.
 
 ---
 
@@ -211,13 +211,13 @@ Examples:
 
 ```powershell
 # Offline events only
-python -m agri_auditor events --data-dir ../provided_data --output artifacts/events.json --disable-gemini
+python -m agri_auditor events --data-dir ../provided_data --output workspace/pipeline_outputs/events.json --disable-gemini
 
 # Report from prebuilt artifacts
-python -m agri_auditor report --data-dir ../provided_data --events-json artifacts/events.json --output artifacts/report.html --report-mode split
+python -m agri_auditor report --data-dir ../provided_data --events-json workspace/pipeline_outputs/events.json --output workspace/pipeline_outputs/audit_report.html --report-mode split
 
 # Benchmark Gemini models (p50/p95/p99 latency, error rate, token throughput)
-python -m agri_auditor benchmark-gemini --data-dir ../provided_data --events-json artifacts/events.json --models gemini-3-flash-preview gemini-2.5-flash --repeats 3
+python -m agri_auditor benchmark-gemini --data-dir ../provided_data --events-json workspace/pipeline_outputs/events.json --models gemini-3-flash-preview gemini-2.5-flash --repeats 3
 ```
 
 ---
@@ -225,6 +225,7 @@ python -m agri_auditor benchmark-gemini --data-dir ../provided_data --events-jso
 ## Data Contract
 
 Default dataset path: `../provided_data` relative to repo root.
+Default pipeline output path: `workspace/pipeline_outputs`.
 
 ```text
 provided_data/
@@ -238,6 +239,7 @@ provided_data/
     rear_center_stereo_left/    1,085 JPEG frames
     rear_right/                 1,085 JPEG frames
     depth/                      16-bit PNG depth maps
+    depth_viz/                  Depth visualization frames (reference only)
 ```
 
 Required manifest columns: `frame_idx`, `timestamp_sec`, `pose_front_center_stereo_left_{x,y,z,qx,qy,qz,qw}`, `has_depth`, `imu_camera_accel_z`, `imu_syslogic_accel_z`. Additional columns (`gps_lat`, `gps_lon`, `gps_alt`, `pose_confidence`) are used when present.
@@ -272,7 +274,7 @@ Configuration precedence: **CLI flags → environment variables → defaults**.
 | `AGRI_AUDITOR_LOG_LEVEL` | `INFO` | Named or numeric log level |
 | `AGRI_AUDITOR_LOG_FORMAT` | `auto` | `auto`, `json`, or `console` |
 | `AGRI_AUDITOR_MLFLOW_ENABLED` | — | Enable MLflow run lineage |
-| `AGRI_AUDITOR_MLFLOW_TRACKING_URI` | `artifacts/mlruns` | MLflow tracking URI |
+| `AGRI_AUDITOR_MLFLOW_TRACKING_URI` | `workspace/pipeline_outputs/mlruns` | MLflow tracking URI |
 
 ---
 
@@ -335,7 +337,7 @@ python -m pytest -q -m gemini_live -o addopts="-p no:cacheprovider"
 # CI-equivalent local gates
 python -m ruff check .
 python -m mypy src
-python scripts/check_perf_budget.py --summary-json artifacts/perf_budget_summary.json
+python scripts/check_perf_budget.py --summary-json workspace/pipeline_outputs/perf_budget_summary.json
 ```
 
 Test coverage spans: ingestion loading, feature math, normalization edge cases, peak detection, scoring weights, Gemini retry/circuit/cache/timeout paths, report rendering (single + split), CSP/XSS hardening, CLI argument parsing, config parsing/validation, run metadata schema validation, and performance budget enforcement.

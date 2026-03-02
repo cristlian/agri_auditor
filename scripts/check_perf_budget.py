@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
 DEFAULT_DATA_DIR = PROJECT_ROOT.parent / "provided_data"
-DEFAULT_ARTIFACT_DIR = PROJECT_ROOT / "artifacts"
-DEFAULT_CACHE_DIR = DEFAULT_ARTIFACT_DIR / "perf_depth_cache"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "workspace" / "pipeline_outputs"
+DEFAULT_CACHE_DIR = DEFAULT_OUTPUT_DIR / "perf_depth_cache"
 DEFAULT_MAX_COLD_SEC = 20.0
 DEFAULT_MAX_WARM_TO_COLD_RATIO = 0.95
 DEFAULT_DEPTH_WORKERS = 1

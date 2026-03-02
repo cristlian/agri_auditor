@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import uuid
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -126,36 +126,37 @@ def test_step2_script_exports_csv() -> None:
         else f"{src_path}{os.pathsep}{existing_pythonpath}"
     )
 
-    output_path = data_dir() / f"features_test_export_{uuid.uuid4().hex}.csv"
+    with tempfile.TemporaryDirectory(prefix="features_export_") as tmp:
+        output_path = Path(tmp) / "features_test_export.csv"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--data-dir",
-            str(data_dir()),
-            "--output",
-            str(output_path),
-        ],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"build_features.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert output_path.exists()
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--data-dir",
+                str(data_dir()),
+                "--output",
+                str(output_path),
+            ],
+            cwd=PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"build_features.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert output_path.exists()
 
-    exported = pd.read_csv(output_path)
-    for col in (
-        "roughness_camera_rms",
-        "roughness_syslogic_rms",
-        "roughness",
-        "min_clearance_m",
-    ):
-        assert col in exported.columns
+        exported = pd.read_csv(output_path)
+        for col in (
+            "roughness_camera_rms",
+            "roughness_syslogic_rms",
+            "roughness",
+            "min_clearance_m",
+        ):
+            assert col in exported.columns
 
 
 # ------------------------------------------------------------------

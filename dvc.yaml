@@ -1,6 +1,6 @@
 stages:
   features:
-    cmd: python -m agri_auditor features --data-dir ../provided_data --output artifacts/features.csv
+    cmd: python -m agri_auditor features --data-dir ../provided_data --output workspace/pipeline_outputs/features.csv
     deps:
       - src/agri_auditor/cli.py
       - src/agri_auditor/features.py
@@ -8,24 +8,24 @@ stages:
       - ../provided_data/manifest.csv
       - ../provided_data/calibrations.json
     outs:
-      - artifacts/features.csv
+      - workspace/pipeline_outputs/features.csv
   events:
-    cmd: python -m agri_auditor events --data-dir ../provided_data --features-csv artifacts/features.csv --output artifacts/events.json --disable-gemini
+    cmd: python -m agri_auditor events --data-dir ../provided_data --features-csv workspace/pipeline_outputs/features.csv --output workspace/pipeline_outputs/events.json --disable-gemini
     deps:
       - src/agri_auditor/cli.py
       - src/agri_auditor/intelligence.py
-      - artifacts/features.csv
+      - workspace/pipeline_outputs/features.csv
       - ../provided_data/manifest.csv
       - ../provided_data/calibrations.json
     outs:
-      - artifacts/events.json
+      - workspace/pipeline_outputs/events.json
   report:
-    cmd: python -m agri_auditor report --data-dir ../provided_data --events-json artifacts/events.json --output artifacts/audit_report.html --report-mode split
+    cmd: python -m agri_auditor report --data-dir ../provided_data --events-json workspace/pipeline_outputs/events.json --output workspace/pipeline_outputs/audit_report.html --report-mode split
     deps:
       - src/agri_auditor/cli.py
       - src/agri_auditor/reporting.py
-      - artifacts/features.csv
-      - artifacts/events.json
+      - workspace/pipeline_outputs/features.csv
+      - workspace/pipeline_outputs/events.json
     outs:
-      - artifacts/audit_report.html
-      - artifacts/audit_report_assets
+      - workspace/pipeline_outputs/audit_report.html
+      - workspace/pipeline_outputs/audit_report_assets

@@ -7,8 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import tempfile
 import time
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -578,7 +578,6 @@ def test_orchestrator_handles_recoverable_analyst_runtime_error(
 
 def test_build_events_script_writes_json() -> None:
     script_path = PROJECT_ROOT / "scripts" / "build_events.py"
-    output_path = data_dir() / f"events_test_export_{uuid.uuid4().hex}.json"
 
     env = os.environ.copy()
     src_path = str(PROJECT_ROOT / "src")
@@ -589,39 +588,41 @@ def test_build_events_script_writes_json() -> None:
         else f"{src_path}{os.pathsep}{existing_pythonpath}"
     )
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--data-dir",
-            str(data_dir()),
-            "--output",
-            str(output_path),
-            "--top-k",
-            "5",
-            "--distance-frames",
-            "150",
-            "--disable-gemini",
-        ],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"build_events.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert output_path.exists()
+    with tempfile.TemporaryDirectory(prefix="events_export_") as tmp:
+        output_path = Path(tmp) / "events_test_export.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--data-dir",
+                str(data_dir()),
+                "--output",
+                str(output_path),
+                "--top-k",
+                "5",
+                "--distance-frames",
+                "150",
+                "--disable-gemini",
+            ],
+            cwd=PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"build_events.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert output_path.exists()
 
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["top_k_requested"] == 5
-    assert payload["distance_frames"] == 150
-    assert payload["rows_processed"] == 1085
-    assert payload["peaks_found"] >= 5
-    assert isinstance(payload["events"], list)
-    assert len(payload["events"]) == 5
-    assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        assert payload["top_k_requested"] == 5
+        assert payload["distance_frames"] == 150
+        assert payload["rows_processed"] == 1085
+        assert payload["peaks_found"] >= 5
+        assert isinstance(payload["events"], list)
+        assert len(payload["events"]) == 5
+        assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
 
 
 def sample_image_path() -> Path:

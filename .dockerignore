@@ -11,6 +11,7 @@ pytest-cache-files-*/
 tmp*/
 
 artifacts/
+workspace/
 audit_report.html
 
 .env

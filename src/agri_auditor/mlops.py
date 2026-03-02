@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MLFLOW_TRACKING_DIR = PROJECT_ROOT / "artifacts" / "mlruns"
+DEFAULT_MLFLOW_TRACKING_DIR = PROJECT_ROOT / "workspace" / "pipeline_outputs" / "mlruns"
 
 
 def mlflow_enabled_from_env(env: Mapping[str, str] | None = None) -> bool:

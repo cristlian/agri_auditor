@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import uuid
 
 import pandas as pd
@@ -66,74 +67,75 @@ def test_python_module_invalid_command_returns_non_zero() -> None:
 
 
 def test_process_disable_gemini_completes_and_writes_outputs() -> None:
-    suffix = uuid.uuid4().hex
-    features_output = data_dir() / f"features_cli_test_{suffix}.csv"
-    events_output = data_dir() / f"events_cli_test_{suffix}.json"
-    report_output = data_dir() / f"audit_cli_test_{suffix}.html"
+    with tempfile.TemporaryDirectory(prefix="cli_process_") as tmp:
+        tmp_dir = Path(tmp)
+        features_output = tmp_dir / "features.csv"
+        events_output = tmp_dir / "events.json"
+        report_output = tmp_dir / "audit_report.html"
 
-    result = _run_module(
-        [
-            "process",
-            "--data-dir",
-            str(data_dir()),
-            "--output-features",
-            str(features_output),
-            "--output-events",
-            str(events_output),
-            "--output-report",
-            str(report_output),
-            "--top-k",
-            "2",
-            "--distance-frames",
-            "150",
-            "--disable-gemini",
-            "--no-surround",
-            "--report-mode",
-            "split",
-            "--report-telemetry-downsample",
-            "2",
-            "--report-feature-columns",
-            "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps",
-            "--gemini-workers",
-            "2",
-            "--gemini-retries",
-            "1",
-            "--gemini-backoff-ms",
-            "0",
-            "--depth-workers",
-            "2",
-            "--peak-prominence",
-            "0.01",
-            "--peak-width",
-            "1",
-            "--peak-min-distance",
-            "150",
-        ]
-    )
-    assert result.returncode == 0, (
-        f"process command failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+        result = _run_module(
+            [
+                "process",
+                "--data-dir",
+                str(data_dir()),
+                "--output-features",
+                str(features_output),
+                "--output-events",
+                str(events_output),
+                "--output-report",
+                str(report_output),
+                "--top-k",
+                "2",
+                "--distance-frames",
+                "150",
+                "--disable-gemini",
+                "--no-surround",
+                "--report-mode",
+                "split",
+                "--report-telemetry-downsample",
+                "2",
+                "--report-feature-columns",
+                "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps",
+                "--gemini-workers",
+                "2",
+                "--gemini-retries",
+                "1",
+                "--gemini-backoff-ms",
+                "0",
+                "--depth-workers",
+                "2",
+                "--peak-prominence",
+                "0.01",
+                "--peak-width",
+                "1",
+                "--peak-min-distance",
+                "150",
+            ]
+        )
+        assert result.returncode == 0, (
+            f"process command failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
-    assert features_output.exists()
-    assert events_output.exists()
-    assert report_output.exists()
+        assert features_output.exists()
+        assert events_output.exists()
+        assert report_output.exists()
 
-    features = pd.read_csv(features_output)
-    assert "roughness" in features.columns
-    assert "min_clearance_m" in features.columns
+        features = pd.read_csv(features_output)
+        assert "roughness" in features.columns
+        assert "min_clearance_m" in features.columns
 
-    payload = json.loads(events_output.read_text(encoding="utf-8"))
-    assert len(payload["events"]) == 2
-    assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
-    assert "dataset_hash" in payload
-    assert "code_version" in payload
-    assert "config_fingerprint" in payload
-    assert "latency_summary" in payload
+        payload = json.loads(events_output.read_text(encoding="utf-8"))
+        assert len(payload["events"]) == 2
+        assert all(event["gemini_source"] == "unavailable" for event in payload["events"])
+        assert "dataset_hash" in payload
+        assert "code_version" in payload
+        assert "config_fingerprint" in payload
+        assert "latency_summary" in payload
 
-    assets_dir = report_output.with_name(f"{report_output.stem}_assets")
-    assert assets_dir.exists()
-    assert (assets_dir / "events.json").exists()
-    assert (assets_dir / "telemetry.json").exists()
+        assets_dir = report_output.with_name(f"{report_output.stem}_assets")
+        assert assets_dir.exists()
+        assert (assets_dir / "events.json").exists()
+        assert (assets_dir / "telemetry.json").exists()
 
 
 def test_process_requires_gemini_key_when_not_disabled() -> None:
@@ -177,22 +179,23 @@ def test_legacy_script_wrappers_forward_to_cli_help() -> None:
 
 def test_prepare_test_data_script_creates_required_files() -> None:
     script_path = PROJECT_ROOT / "scripts" / "prepare_test_data.py"
-    tmp_dir = PROJECT_ROOT / "artifacts" / f"provided_data_test_{uuid.uuid4().hex}"
-    result = subprocess.run(
-        [sys.executable, str(script_path), "--output-dir", str(tmp_dir)],
-        cwd=PROJECT_ROOT,
-        env=_pythonpath_env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"prepare_test_data.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert (tmp_dir / "manifest.csv").exists()
-    assert (tmp_dir / "calibrations.json").exists()
-    assert (tmp_dir / "frames" / "front_center_stereo_left" / "0000.jpg").exists()
-    assert (tmp_dir / "frames" / "depth" / "0000.png").exists()
+    with tempfile.TemporaryDirectory(prefix="provided_data_test_") as tmp:
+        tmp_dir = Path(tmp)
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--output-dir", str(tmp_dir)],
+            cwd=PROJECT_ROOT,
+            env=_pythonpath_env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"prepare_test_data.py failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert (tmp_dir / "manifest.csv").exists()
+        assert (tmp_dir / "calibrations.json").exists()
+        assert (tmp_dir / "frames" / "front_center_stereo_left" / "0000.jpg").exists()
+        assert (tmp_dir / "frames" / "depth" / "0000.png").exists()
 
 
 def test_backfill_event_camera_paths_recovers_surround_views() -> None:
