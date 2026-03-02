@@ -159,6 +159,37 @@ def test_process_requires_gemini_key_when_not_disabled() -> None:
     assert "GEMINI_API_KEY" in (result.stderr + result.stdout)
 
 
+def test_process_missing_gemini_key_writes_no_partial_outputs() -> None:
+    with tempfile.TemporaryDirectory(prefix="cli_process_no_key_") as tmp:
+        tmp_dir = Path(tmp)
+        features_output = tmp_dir / "features.csv"
+        events_output = tmp_dir / "events.json"
+        report_output = tmp_dir / "audit_report.html"
+
+        result = _run_module(
+            [
+                "process",
+                "--data-dir",
+                str(data_dir()),
+                "--output-features",
+                str(features_output),
+                "--output-events",
+                str(events_output),
+                "--output-report",
+                str(report_output),
+                "--report-mode",
+                "split",
+                "--no-surround",
+            ],
+            env_overrides={"GEMINI_API_KEY": ""},
+        )
+        assert result.returncode != 0
+        assert "GEMINI_API_KEY" in (result.stderr + result.stdout)
+        assert not features_output.exists()
+        assert not events_output.exists()
+        assert not report_output.exists()
+
+
 def test_process_default_report_output_is_variant_specific() -> None:
     split_gemini = _resolve_process_report_output_path(
         DEFAULT_REPORT_OUTPUT,

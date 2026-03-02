@@ -193,7 +193,12 @@ it now auto-suffixes by mode and Gemini state to avoid overwrite collisions:
 `audit_report_split_gemini.html`, `audit_report_split_nogemini.html`,
 `audit_report_single_gemini.html`, or `audit_report_single_nogemini.html`.
 
-**4. Open** `workspace/pipeline_outputs/audit_report_split_gemini.html` (or the variant you just ran) in any browser.
+**4. Open reports (PowerShell):**
+
+```powershell
+Start-Process "workspace/pipeline_outputs/audit_report_split_gemini.html"
+Start-Process "workspace/pipeline_outputs/audit_report_split_nogemini.html"
+```
 
 ---
 

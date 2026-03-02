@@ -638,6 +638,13 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
         report_mode=str(_resolve_optional_arg(args, "report_mode", runtime.report_mode)),
     )
     model = _resolve_gemini_model(args.model, runtime)
+    analyst, gemini_disabled_reason = _init_analyst(
+        disable_gemini=args.disable_gemini,
+        model=model,
+        runtime=runtime,
+        args=args,
+        logger=logger,
+    )
 
     log_event(
         logger,
@@ -659,13 +666,6 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
     features_df.to_csv(output_features, index=False)
 
     detector = _make_event_detector(runtime, args)
-    analyst, gemini_disabled_reason = _init_analyst(
-        disable_gemini=args.disable_gemini,
-        model=model,
-        runtime=runtime,
-        args=args,
-        logger=logger,
-    )
     orchestrator = IntelligenceOrchestrator(
         loader=loader,
         detector=detector,
