@@ -9,7 +9,11 @@ import tempfile
 
 import pandas as pd
 
-from agri_auditor.cli import _backfill_event_camera_paths
+from agri_auditor.cli import (
+    DEFAULT_REPORT_OUTPUT,
+    _backfill_event_camera_paths,
+    _resolve_process_report_output_path,
+)
 from agri_auditor.ingestion import LogLoader
 from agri_auditor.intelligence import Event, UNAVAILABLE_CAPTION
 
@@ -153,6 +157,28 @@ def test_process_requires_gemini_key_when_not_disabled() -> None:
     )
     assert result.returncode != 0
     assert "GEMINI_API_KEY" in (result.stderr + result.stdout)
+
+
+def test_process_default_report_output_is_variant_specific() -> None:
+    split_gemini = _resolve_process_report_output_path(
+        DEFAULT_REPORT_OUTPUT,
+        disable_gemini=False,
+        report_mode="split",
+    )
+    split_nogemini = _resolve_process_report_output_path(
+        DEFAULT_REPORT_OUTPUT,
+        disable_gemini=True,
+        report_mode="split",
+    )
+    custom_output = _resolve_process_report_output_path(
+        Path("custom/out.html"),
+        disable_gemini=False,
+        report_mode="split",
+    )
+
+    assert split_gemini.name == "audit_report_split_gemini.html"
+    assert split_nogemini.name == "audit_report_split_nogemini.html"
+    assert custom_output == Path("custom/out.html")
 
 
 def test_legacy_script_wrappers_forward_to_cli_help() -> None:

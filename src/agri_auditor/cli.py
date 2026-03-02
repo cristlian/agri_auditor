@@ -337,6 +337,25 @@ def _resolve_gemini_model(cli_model: str | None, runtime: RuntimeConfig) -> str:
     return runtime.gemini_model
 
 
+def _resolve_process_report_output_path(
+    report_output: Path,
+    *,
+    disable_gemini: bool,
+    report_mode: str,
+) -> Path:
+    """
+    Keep explicit --output-report untouched, but suffix default report output so
+    different process variants don't overwrite each other.
+    """
+    if report_output != _resolve_path(DEFAULT_REPORT_OUTPUT):
+        return report_output
+    mode_token = "split" if str(report_mode).strip().lower() == "split" else "single"
+    gemini_token = "nogemini" if disable_gemini else "gemini"
+    return report_output.with_name(
+        f"{report_output.stem}_{mode_token}_{gemini_token}{report_output.suffix}"
+    )
+
+
 def _init_analyst(
     *,
     disable_gemini: bool,
@@ -613,7 +632,11 @@ def _cmd_process(args: argparse.Namespace, runtime: RuntimeConfig, logger: Any) 
     data_dir = _resolve_path(args.data_dir)
     output_features = _resolve_path(args.output_features)
     output_events = _resolve_path(args.output_events)
-    output_report = _resolve_path(args.output_report)
+    output_report = _resolve_process_report_output_path(
+        _resolve_path(args.output_report),
+        disable_gemini=bool(args.disable_gemini),
+        report_mode=str(_resolve_optional_arg(args, "report_mode", runtime.report_mode)),
+    )
     model = _resolve_gemini_model(args.model, runtime)
 
     log_event(
@@ -1228,7 +1251,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-report",
         type=Path,
         default=DEFAULT_REPORT_OUTPUT,
-        help=f"Output HTML path for report. Default: {DEFAULT_REPORT_OUTPUT}",
+        help=(
+            f"Output HTML path for report. Default base: {DEFAULT_REPORT_OUTPUT} "
+            "(auto-suffixed by mode/Gemini variant to avoid overwrites)."
+        ),
     )
     parser_process.add_argument(
         "--top-k",

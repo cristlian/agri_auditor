@@ -73,7 +73,8 @@ Mission Logs                          6-Camera Surround + Depth
                        ▼
             workspace/pipeline_outputs/features.csv
             workspace/pipeline_outputs/events.json
-            workspace/pipeline_outputs/audit_report.html
+            workspace/pipeline_outputs/audit_report_split_gemini.html
+            workspace/pipeline_outputs/audit_report_split_nogemini.html
             workspace/pipeline_outputs/*_assets/ (split mode)
 ```
 
@@ -187,7 +188,12 @@ python -m agri_auditor process `
   --report-mode split
 ```
 
-**4. Open** `workspace/pipeline_outputs/audit_report.html` in any browser.
+When `process` writes to the default report path (`workspace/pipeline_outputs/audit_report.html`),
+it now auto-suffixes by mode and Gemini state to avoid overwrite collisions:
+`audit_report_split_gemini.html`, `audit_report_split_nogemini.html`,
+`audit_report_single_gemini.html`, or `audit_report_single_nogemini.html`.
+
+**4. Open** `workspace/pipeline_outputs/audit_report_split_gemini.html` (or the variant you just ran) in any browser.
 
 ---
 
