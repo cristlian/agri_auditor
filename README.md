@@ -155,49 +155,63 @@ Report extras: `plotly`, `jinja2`.
 
 ## Quickstart
 
-**1. Prepare dataset** (synthetic deterministic data, if you don't have real mission data):
+**1. Open PowerShell at repo root:**
+
+```powershell
+cd "d:\IC\求职\面试\Voltrac\Take home assessment\agri_auditor"
+```
+
+**2. Prepare dataset** (synthetic deterministic data, if you don't have real mission data):
 
 ```powershell
 python scripts/prepare_test_data.py --output-dir ../provided_data
 ```
 
-**2. Run the full pipeline** (Gemini-enabled primary path):
+**3. Clean outputs before demo run** (recommended every time):
+
+```powershell
+if (Test-Path workspace/pipeline_outputs) { Remove-Item workspace/pipeline_outputs -Recurse -Force }
+New-Item -ItemType Directory -Path workspace/pipeline_outputs -Force | Out-Null
+```
+
+**4. Run Mode 1** (Gemini-enabled + split report):
 
 ```powershell
 $env:GEMINI_API_KEY = "your-key-here"
 
 python -m agri_auditor process `
   --data-dir ../provided_data `
-  --output-features workspace/pipeline_outputs/features.csv `
-  --output-events workspace/pipeline_outputs/events.json `
-  --output-report workspace/pipeline_outputs/audit_report.html `
-  --report-mode split `
-  --report-telemetry-downsample 2 `
-  --report-feature-columns "timestamp_sec,_elapsed,gps_lat,gps_lon,velocity_mps,min_clearance_m,severity_score"
+  --report-mode split
 ```
 
-**3. Run offline** (deterministic fallback, no network required):
+**5. Run Mode 2** (offline fallback: Gemini disabled + split report):
 
 ```powershell
 python -m agri_auditor process `
   --data-dir ../provided_data `
-  --output-features workspace/pipeline_outputs/features.csv `
-  --output-events workspace/pipeline_outputs/events.json `
-  --output-report workspace/pipeline_outputs/audit_report.html `
   --disable-gemini `
   --report-mode split
 ```
 
-When `process` writes to the default report path (`workspace/pipeline_outputs/audit_report.html`),
-it now auto-suffixes by mode and Gemini state to avoid overwrite collisions:
+Auto-suffix overwrite protection applies when using the default report path
+(`workspace/pipeline_outputs/audit_report.html`).
+If you pass a custom `--output-report`, use different filenames per mode manually.
+
+With default output path, `process` auto-suffixes by mode and Gemini state:
 `audit_report_split_gemini.html`, `audit_report_split_nogemini.html`,
 `audit_report_single_gemini.html`, or `audit_report_single_nogemini.html`.
 
-**4. Open reports (PowerShell):**
+**6. Open reports (PowerShell):**
 
 ```powershell
 Start-Process "workspace/pipeline_outputs/audit_report_split_gemini.html"
 Start-Process "workspace/pipeline_outputs/audit_report_split_nogemini.html"
+```
+
+**7. Verify output files (optional):**
+
+```powershell
+Get-ChildItem workspace/pipeline_outputs
 ```
 
 ---
