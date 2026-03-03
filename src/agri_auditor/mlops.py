@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -7,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MLFLOW_TRACKING_DIR = PROJECT_ROOT / "workspace" / "pipeline_outputs" / "mlruns"
+logger = logging.getLogger(__name__)
 
 
 def mlflow_enabled_from_env(env: Mapping[str, str] | None = None) -> bool:
@@ -58,8 +60,12 @@ def log_run_lineage(
 
     try:
         Path(resolved_tracking_uri).mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning(
+            "Failed to create MLFlow directory '%s': %s",
+            resolved_tracking_uri,
+            exc,
+        )
 
     try:
         mlflow.set_tracking_uri(resolved_tracking_uri)
@@ -75,5 +81,6 @@ def log_run_lineage(
                 if path.exists() and path.is_file():
                     mlflow.log_artifact(str(path))
         return True
-    except Exception:
+    except (mlflow.exceptions.MlflowException, OSError) as exc:
+        logger.warning("Failed to log lineage to MLFlow: %s", exc)
         return False

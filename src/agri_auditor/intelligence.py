@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import random
@@ -51,6 +52,7 @@ DEFAULT_GEMINI_CIRCUIT_FAILURES = 3
 DEFAULT_GEMINI_CIRCUIT_COOLDOWN_SEC = 30.0
 DEFAULT_GEMINI_WORKERS = 4
 UNAVAILABLE_CAPTION = "AI Analysis Unavailable"
+logger = logging.getLogger(__name__)
 
 RECOVERABLE_ANALYSIS_ERRORS = (
     RuntimeError,
@@ -1034,8 +1036,12 @@ class GeminiAnalyst:
                     cache_path.write_text(serialized, encoding="utf-8")
                     try:
                         tmp_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to remove temporary Gemini cache file '%s': %s",
+                            tmp_path,
+                            exc,
+                        )
         except OSError:
             return
 

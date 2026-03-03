@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -346,6 +347,53 @@ def test_gemini_analyst_cache_hit_skips_remote_calls(
     assert first.source == "sdk"
     assert second.source == "cache"
     assert calls["sdk"] == 1
+
+
+def test_gemini_analyst_cache_fallback_logs_temp_cleanup_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    analyst = GeminiAnalyst(
+        model="gemini-3-flash-preview",
+        cache_dir=tmp_path,
+        retries=0,
+        backoff_ms=0,
+    )
+    result = GeminiAnalysisResult(
+        caption="Cached fallback caption.",
+        model="gemini-3-flash-preview",
+        source="sdk",
+        latency_ms=12.0,
+    )
+    cache_key = "fallback-log-test"
+    expected_tmp_name = f"{cache_key}.tmp"
+    original_replace = Path.replace
+    original_unlink = Path.unlink
+
+    def _replace_raise_oserror(self: Path, target: Path) -> Path:
+        if self.name == expected_tmp_name:
+            raise OSError("atomic replace failed")
+        return original_replace(self, target)
+
+    def _unlink_raise_oserror(self: Path, missing_ok: bool = False) -> None:
+        if self.name == expected_tmp_name:
+            raise OSError("temp cleanup failed")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr("agri_auditor.intelligence.Path.replace", _replace_raise_oserror)
+    monkeypatch.setattr("agri_auditor.intelligence.Path.unlink", _unlink_raise_oserror)
+
+    with caplog.at_level(logging.WARNING):
+        analyst._write_cached_result(cache_key, result)
+
+    cache_path = tmp_path / f"{cache_key}.json"
+    assert cache_path.exists()
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["caption"] == "Cached fallback caption."
+    assert "Failed to remove temporary Gemini cache file" in caplog.text
+    assert "temp cleanup failed" in caplog.text
 
 
 def test_gemini_analyst_retries_then_recovers(
