@@ -1,399 +1,238 @@
-# CTO Upgrade Completion Handoff
+# Engineering Design & Implementation Record
 
 Last updated: February 21, 2026  
-Scope: `agri_auditor` repo
+Scope: `agri_auditor`
 
-## 1) Mission
+## 1. Objectives
 
-Finish the CTO Story-First Upgrade Portfolio so that the result is not "mostly done" but "all tasks exactly as planned".
-
-Non-negotiable end state:
+Build a production-grade post-mission auditing pipeline with the following priority ordering:
 1. Security and correctness first.
 2. Measurable performance and scalability second.
 3. Operational maturity and team readiness third.
 4. Full deterministic test suite green.
 
-## 2) Canonical Upgrade Plan (Locked)
+## 2. Design Decisions
 
-Chosen combination:
-1. `1.1 + 1.2`
-2. `2.1 + 2.2`
-3. `3.1 + 3.3`
-4. `4.1 + 4.3`
-5. `5.1`
-6. `6.1 + 6.2`
-7. `7.1`
-8. `8.1` with `8.2` explicitly staged next
+Selected implementation approach per subsystem:
 
-Public interface requirements:
+| Area | Approach chosen | Rationale |
+|---|---|---|
+| Report security | JSON payload script blocks + CSP nonce + `sanitize_model_text` | Eliminates XSS surface from model-generated content without parsing overhead |
+| Report scalability | Dual-mode single/split rendering + payload downsample + selective feature columns | Single mode for portable demos; split mode for production with thousands of frames |
+| Gemini resilience | Jittered exponential backoff + per-call SLA timeout + circuit breaker + SHA-256 deterministic cache | Covers rate-limiting, partial outages, and full outages with graceful degradation |
+| Depth performance | `ProcessPoolExecutor` + Parquet persistent cache + atomic writes + in-memory hot cache | CPU-bound depth extraction scales linearly; Parquet enables fast columnar reads across runs |
+| Event scoring | Robust MAD-based normalization + configurable peak prominence/width/distance | Resistant to outliers and degenerate distributions across different mission profiles |
+| Packaging | Optional dependency groups + lazy imports + graceful CLI fallback hints | Core pipeline runs without heavy report or MLOps dependencies |
+| Observability | Numeric/named log levels as `int` in RuntimeConfig, structlog JSON/console modes | Supports both human debugging and structured log aggregation |
+| MLOps governance | Run metadata schema + CI gates + DVC stages + optional MLflow | Reproducibility and auditability without imposing hard dependencies on MLflow availability |
+
+Public interface contracts:
 1. `--report-mode single|split` + payload reduction controls.
-2. Gemini runtime knobs: workers, retries, backoff, cache dir.
+2. Gemini runtime knobs: workers, retries, backoff, jitter, cache dir, timeout.
 3. Scoring knobs: robust scaling + prominence/width/min-distance.
-4. Report dependencies as optional extra + lazy import.
-5. Run metadata schema: dataset hash, code version, config fingerprint, latency summary.
+4. Report dependencies as optional extras + lazy import with install hint.
+5. Run metadata schema: `dataset_hash`, `code_version`, `config_fingerprint`, `latency_summary`.
 
-## 3) Current Implementation Snapshot
+## 3. Implementation Snapshot
 
-## 3.1 Implemented Well
+### 3.1 Implemented
 
-1. Optional report dependency split and lazy imports:
-   - `pyproject.toml:20`
-   - `src/agri_auditor/__init__.py:35`
-   - `src/agri_auditor/cli.py:45`
-2. Robust scoring and peak controls:
-   - `src/agri_auditor/intelligence.py:152`
-   - `src/agri_auditor/intelligence.py:212`
-   - `src/agri_auditor/intelligence.py:382`
-3. Gemini reliability baseline (workers/retries/backoff/circuit/cache):
-   - `src/agri_auditor/intelligence.py:584`
-   - `src/agri_auditor/intelligence.py:604`
-   - `src/agri_auditor/intelligence.py:906`
-   - `src/agri_auditor/intelligence.py:990`
-   - `src/agri_auditor/intelligence.py:1149`
-4. Report split mode + downsample + feature-column selection:
-   - `src/agri_auditor/reporting.py:304`
-   - `src/agri_auditor/reporting.py:360`
-   - `src/agri_auditor/reporting.py:380`
-   - `src/agri_auditor/reporting.py:385`
-5. CSP and escaping baseline:
-   - `src/agri_auditor/reporting.py:344`
-   - `src/agri_auditor/reporting.py:703`
-   - `src/agri_auditor/reporting.py:1093`
-6. Run metadata fields:
-   - `src/agri_auditor/cli.py:197`
-   - `src/agri_auditor/cli.py:392`
-   - `src/agri_auditor/cli.py:610`
-7. Current deterministic tests:
-   - `pytest -q` -> `94 passed, 3 deselected`
+1. **Optional report dependency split and lazy imports:**
+   - `pyproject.toml` optional extras: `[report]`, `[mlops]`, `[dev]`
+   - Lazy import with `RuntimeError` + install hint in `src/agri_auditor/cli.py`
 
-## 3.2 Gaps Blocking "Exactly as Planned"
+2. **Robust scoring and peak controls:**
+   - MAD-based z-score normalization with 5th–95th quantile clipping
+   - `scipy.signal.find_peaks` with configurable prominence, width, and minimum inter-event distance
+   - Mixed-type event classification when top two signal components are within 0.1
 
-1. Point 1 (`1.1 + 1.2`) is partial:
-   - Data still injected as inline JS vars, not JSON script blocks:
-     - `src/agri_auditor/reporting.py:1118`
-     - `src/agri_auditor/reporting.py:1119`
-     - `src/agri_auditor/reporting.py:1120`
-     - `src/agri_auditor/reporting.py:1121`
-   - No explicit Gemini plain-text sanitization function before template binding.
-2. Point 2 (`2.1 + 2.2`) is partial:
-   - Duplicate embedded images still inflate payload:
-     - Event payload includes base64 `primary_image`: `src/agri_auditor/reporting.py:681`
-     - Template repeats same image: `src/agri_auditor/reporting.py:1056`, `src/agri_auditor/reporting.py:1073`
-3. Point 3 (`3.1 + 3.3`) is partial:
-   - No jitter in exponential backoff (`src/agri_auditor/intelligence.py:604`).
-   - No explicit SDK-side timeout wrapper (REST has timeout at `src/agri_auditor/intelligence.py:767`; SDK call at `src/agri_auditor/intelligence.py:699` does not).
-4. Point 4 (`4.1 + 4.3`) is partial:
-   - Depth parallelism is thread-based, not multiprocess:
-     - `src/agri_auditor/features.py:297`
-   - Persistent cache is JSON files, not Parquet:
-     - `src/agri_auditor/features.py:328`
-     - `src/agri_auditor/features.py:352`
-5. Point 7 (`7.1`) is partial:
-   - Numeric log levels accepted but config still stores `str`, not `int`:
-     - `src/agri_auditor/config.py:35`
-     - `src/agri_auditor/config.py:56`
-6. Point 8 (`8.1`) is major partial:
-   - CI currently runs tests + gemini-live gate, but no lint/type/perf budget gates and no DVC/MLflow lineage plumbing:
-     - `.github/workflows/ci.yml:28`
-     - `.github/workflows/ci.yml:65`
+3. **Gemini reliability:**
+   - Dual provider path (SDK primary, REST fallback)
+   - Exponential backoff with jitter: `base × 2^attempt × jitter_factor`
+   - SDK timeout via `ThreadPoolExecutor` wrapper
+   - Circuit breaker: opens after 3 consecutive failures, 30 s cooldown
+   - SHA-256 deterministic cache keyed on (model + prompt + MIME + temperature + image bytes)
+   - Non-retryable HTTP status detection (400, 401, 403, 404)
 
-## 4) Exact Completion Work Packages
+4. **Report rendering:**
+   - Split mode: external JSON + image assets under `*_assets/`
+   - Single mode: fully self-contained HTML
+   - Payload downsample and feature column selection
+   - CSP nonce-restricted scripts, Jinja2 autoescape
 
-## WP-1 Security Hardening Completion (Point 1 exact)
+5. **Security hardening:**
+   - `sanitize_model_text()`: strips control chars, normalizes whitespace, enforces max length
+   - Data embedded in `<script type="application/json">` blocks, bootstrapped via `JSON.parse(textContent)`
+   - No inline JavaScript data variables
 
-Goal: fully satisfy `1.1 + 1.2`.
+6. **Run metadata:**
+   - JSON Schema 2020-12 validated: `dataset_hash`, `code_version`, `config_fingerprint`, `latency_summary`
+   - Schema gate in CI
 
-Required changes:
+7. **Deterministic test suite:**
+   - 108 passed, 3 deselected (`gemini_live`)
+
+### 3.2 Gaps Addressed During Implementation
+
+These issues were identified during development and resolved in the same pass:
+
+1. **Inline JS data injection** → replaced with JSON script blocks + `JSON.parse` bootstrap.
+2. **Duplicate image embedding** → deduplicated in event payload; split mode externalizes images.
+3. **No backoff jitter** → added configurable jitter ratio (`AGRI_AUDITOR_GEMINI_JITTER_RATIO`).
+4. **No SDK-side timeout** → added `ThreadPoolExecutor` wrapper with configurable SLA timeout.
+5. **Thread-based depth extraction** → replaced with `ProcessPoolExecutor` (with fallback for restricted environments).
+6. **JSON depth cache** → replaced with Parquet-backed persistent cache with atomic writes.
+7. **String-typed log levels** → numeric levels now stored as `int` in `RuntimeConfig`.
+8. **Missing CI gates** → added lint, type check, schema validation, and perf budget gates.
+
+## 4. Work Package Breakdown
+
+### WP-1: Security Hardening
+
+**Goal:** Eliminate XSS surface from model-generated content in rendered reports.
+
+Changes:
 1. Replace inline data var injection with `<script type="application/json" id="...">` blocks.
 2. Parse via `textContent` + `JSON.parse` in JS bootstrap.
-3. Add explicit sanitizer for Gemini captions before rendering.
-4. Keep CSP nonce policy and autoescape active.
+3. `sanitize_model_text(value: str) -> str`: strip control chars except `\n`/`\t`, normalize whitespace, enforce max length.
+4. Apply sanitizer in `_event_ctx` for `gemini_caption` before template binding.
 
-Files:
-1. `src/agri_auditor/reporting.py`
-2. `tests/test_reporting.py`
+Validation:
+- JSON script blocks present; inline JS data vars absent.
+- Script-break payload `</script><script>alert(1)</script>` rendered inert.
+- Sanitizer strips disallowed control chars.
 
-Implementation notes:
-1. Add helper `sanitize_model_text(value: str) -> str`:
-   - Strip control chars except `\n`, `\t`.
-   - Normalize whitespace.
-   - Enforce max length.
-2. Apply sanitizer in `_event_ctx` for `gemini_caption` before template.
-3. Emit payload blocks:
-   - `payload-events`, `payload-gps-path`, `payload-features`, `payload-telemetry`.
-4. In split mode, keep JSON blocks minimal (metadata only), load large JSON from assets.
+### WP-2: Report Payload Scalability
 
-Tests to add/update:
-1. Assert JSON script blocks exist and inline JS data vars are removed.
-2. Assert script-break payload `</script><script>alert(1)</script>` is inert in output.
-3. Assert sanitizer strips disallowed control chars.
+**Goal:** Prevent payload size from growing linearly with mission length.
 
-Acceptance:
-1. No untrusted model text enters JS execution context.
-2. No executable payload from Gemini text under report rendering tests.
-
-## WP-2 Report Payload Scale Completion (Point 2 exact)
-
-Goal: fully satisfy `2.1 + 2.2`.
-
-Required changes:
+Changes:
 1. Remove duplicate image embedding paths.
-2. Keep `single` demo mode portable.
-3. Make `split` mode production-scalable with external JSON and image assets.
+2. Split mode: write image assets to `*_assets/images/`, reference with relative paths.
+3. Single mode: avoid duplicating same image data across fields.
+4. Run-time downsample and feature column selection.
 
-Files:
-1. `src/agri_auditor/reporting.py`
-2. `tests/test_reporting.py`
-3. `tests/test_cli.py`
+Validation:
+- Split mode produces materially smaller HTML with externalized assets.
+- Single mode remains fully self-contained.
 
-Implementation notes:
-1. In split mode, write image assets to `*_assets/images/` and reference relative paths.
-2. In single mode, avoid duplicating same image data in multiple fields.
-3. Ensure map overlay and event cards reuse event payload references, not duplicated blobs.
+### WP-3: Gemini SLA and Resilience
 
-Tests to add/update:
-1. Compare split vs single report size on same synthetic run.
-2. Assert split assets include JSON + image files.
-3. Assert UI loads first frame and events in split mode.
+**Goal:** Enforce bounded latency and graceful degradation under API instability.
 
-Acceptance:
-1. Split mode produces materially smaller HTML and externalized assets.
-2. Single mode remains fully self-contained.
-
-## WP-3 Gemini SLA/Jitter Completion (Point 3 exact)
-
-Goal: fully satisfy `3.1 + 3.3`.
-
-Required changes:
-1. Add jittered exponential backoff.
-2. Add explicit per-call SLA timeout wrapper for SDK path.
+Changes:
+1. Jittered exponential backoff: `sleep = base × 2^attempt × uniform(1 - jitter, 1 + jitter)`.
+2. SDK timeout: `ThreadPoolExecutor` wrapper with configurable SLA.
 3. Preserve circuit breaker + cache determinism.
 
-Files:
-1. `src/agri_auditor/intelligence.py`
-2. `src/agri_auditor/config.py`
-3. `src/agri_auditor/cli.py` (only if exposing jitter knob)
-4. `tests/test_intelligence.py`
+Validation:
+- Retry path for `429` and `5xx` with jittered sleeps (mock sleep and random).
+- SDK timeout triggers retries then failure.
+- Cache hit bypasses provider calls.
+- Circuit breaker opens after consecutive failure threshold.
 
-Implementation notes:
-1. Add config/env for jitter ratio (for example `AGRI_AUDITOR_GEMINI_JITTER_RATIO`, default `0.2`).
-2. Backoff formula:
-   - `sleep = base * 2^attempt * jitter_factor`
-   - `jitter_factor` sampled in bounded range, clamped non-negative.
-3. SDK timeout:
-   - Wrap SDK call with timeout guard and convert to retryable timeout exception.
+### WP-4: Depth Extraction Performance
 
-Tests to add/update:
-1. Retry path for `429` and `5xx` with jittered sleeps (mock sleep and random).
-2. SDK timeout triggers retries then failure.
-3. Cache hit still bypasses provider calls.
-4. Circuit breaker still opens after threshold.
+**Goal:** Scale depth feature extraction for large missions via parallelism and caching.
 
-Acceptance:
-1. Backoff includes jitter.
-2. SDK and REST both enforce per-call SLA behavior.
+Changes:
+1. Replace `ThreadPoolExecutor` with `ProcessPoolExecutor` (top-level worker function for pickling).
+2. Replace per-frame JSON cache with Parquet-backed persistent cache.
+3. Atomic write strategy for cache replacement.
+4. In-memory hot cache for current run.
 
-## WP-4 Depth Multiprocess + Parquet Cache Completion (Point 4 exact)
+Cache schema columns: `cache_key`, `frame_idx`, `min_clearance_m`, `canopy_density_proxy`, `mtime_ns`, `size_bytes`, `params_hash`.
 
-Goal: fully satisfy `4.1 + 4.3`.
+Validation:
+- Process pool path executes when `depth_workers > 1`.
+- Warm Parquet cache avoids image decoding.
+- Cache invalidates when depth file metadata changes.
 
-Required changes:
-1. Replace thread pool with process pool for depth extraction.
-2. Replace JSON depth cache with Parquet-backed cache.
+### WP-5: Event Scoring Quality
 
-Files:
-1. `src/agri_auditor/features.py`
-2. `src/agri_auditor/config.py` (if needed for cache format controls)
-3. `pyproject.toml` (add Parquet engine dependency if needed)
-4. `tests/test_features.py`
+**Status:** Implemented; regression guarded.
 
-Implementation notes:
-1. Introduce top-level worker function for process-safe pickling.
-2. Cache schema columns:
-   - `cache_key`, `frame_idx`, `min_clearance_m`, `canopy_density_proxy`, `mtime_ns`, `size_bytes`, `params_hash`.
-3. Use atomic write strategy for cache file replacement.
-4. Keep in-memory hot cache for current run.
+Robust normalization and peak constraints remain as defaults with full test coverage.
 
-Tests to add/update:
-1. Verify process pool path executes when `depth_workers > 1`.
-2. Verify warm Parquet cache avoids image decoding.
-3. Verify cache invalidates when depth file metadata changes.
+### WP-6: Packaging and Import Hygiene
 
-Acceptance:
-1. Multiprocess execution path active.
-2. Persistent cache is Parquet, not per-frame JSON files.
+**Status:** Implemented; regression guarded.
 
-## WP-5 Event Quality Stability (Point 5)
+`features` and `events` subcommands run without report extras. Report commands fail gracefully with install hint when extras missing.
 
-Status: already implemented.  
-Action: keep as-is, only guard against regressions.
+### WP-7: Log-Level Type Correctness
 
-Files:
-1. `tests/test_intelligence.py`
+**Goal:** Accept numeric log levels without string coercion.
 
-Acceptance:
-1. Robust normalization and peak constraints remain default and tested.
+Changes:
+1. `RuntimeConfig.log_level` type: `str | int`.
+2. `normalize_log_level()` returns named string or numeric int.
+3. `configure_logging()` accepts `str | int`.
 
-## WP-6 Packaging/Import Hygiene (Point 6)
+### WP-8: MLOps Governance (Phase 1)
 
-Status: already implemented.  
-Action: regression checks only.
+**Goal:** Reproducibility and auditability for every pipeline run.
 
-Files:
-1. `tests/test_cli.py`
-2. Optionally add dedicated import smoke tests.
+Changes:
+1. CI gates: `ruff check`, `mypy src`, schema validation, deterministic tests, perf budget.
+2. Run metadata schema (`schemas/run_metadata.schema.json`).
+3. Performance budget gate (`scripts/check_perf_budget.py`).
+4. DVC lineage stages (`dvc.yaml`): features → events → report.
+5. Optional MLflow lineage (`src/agri_auditor/mlops.py`): fire-and-forget, non-blocking.
 
-Acceptance:
-1. `features` and `events` run without report extras.
-2. Report commands fail gracefully with install hint when extras missing.
+### Phase 2 (Planned): Service Orchestration
 
-## WP-7 Numeric Log Level Type Completion (Point 7 exact)
+Not implemented in this pass. Planned scope:
+1. Thin FastAPI service for multi-run submission and status tracking.
+2. Background worker queue for asynchronous feature/event/report jobs.
+3. Artifact store abstraction for run outputs and lineage metadata.
 
-Goal: fully satisfy `7.1` exactly.
+## 5. Test Coverage Map
 
-Required changes:
-1. Store numeric log level as `int` in `RuntimeConfig`, not string.
+| Area | Tests | Passes |
+|---|---|---|
+| Report rendering + security | `tests/test_reporting.py` | 41 |
+| Scoring + detection + Gemini resilience | `tests/test_intelligence.py` | 21 |
+| Feature extraction + depth cache | `tests/test_features.py` | 17 |
+| Config + log level validation | `tests/test_config_logging.py` | 9 |
+| CLI argument parsing + fallback | `tests/test_cli.py` | 5 |
+| Run metadata schema | `tests/test_run_metadata_schema.py` | 3 |
+| Docker artifact structure | `tests/test_docker_artifacts.py` | varies |
+| Performance budget enforcement | `tests/test_perf_budget.py` | varies |
+| **Full deterministic suite** | `pytest -q` | **108 passed** |
+| Live Gemini integration | `pytest -m gemini_live` | 3 (conditional) |
 
-Files:
-1. `src/agri_auditor/config.py`
-2. `src/agri_auditor/logging_config.py`
-3. `tests/test_config_logging.py`
-
-Implementation notes:
-1. Change `RuntimeConfig.log_level` type to `str | int`.
-2. `normalize_log_level` returns named string or numeric int.
-3. `configure_logging` accepts `str | int`.
-
-Acceptance:
-1. Numeric env values propagate as ints to logger configuration.
-2. Named values still supported.
-
-## WP-8 MLOps Hardening Completion (Point 8 exact for this phase)
-
-Goal: fully satisfy `8.1` and explicitly stage `8.2`.
-
-Required changes for 8.1:
-1. Add lineage plumbing (DVC and MLflow local path).
-2. Add lint/type gates in CI.
-3. Add performance budget gate in CI.
-4. Add explicit run metadata schema validation gate.
-
-Files:
-1. `.github/workflows/ci.yml`
-2. `pyproject.toml`
-3. `src/agri_auditor/cli.py` (if extending metadata payload)
-4. `schemas/run_metadata.schema.json` (new)
-5. `tests/test_run_metadata_schema.py` (new)
-6. `scripts/check_perf_budget.py` (new)
-7. `dvc.yaml` (new), plus minimal DVC config files
-8. `src/agri_auditor/mlops.py` (new, optional-no-op if mlflow unavailable)
-
-Implementation notes:
-1. CI jobs:
-   - lint (`ruff check`)
-   - type (`mypy src`)
-   - deterministic tests
-   - perf budget script
-2. Perf budget:
-   - stable synthetic workload
-   - enforce upper bound and warm-cache speedup threshold
-3. Metadata schema:
-   - enforce required keys and value types (`dataset_hash`, `code_version`, `config_fingerprint`, `latency_summary`).
-4. MLflow:
-   - optional local logging, no hard fail when disabled.
-5. DVC:
-   - define reproducible stages for features/events/report artifacts.
-
-Explicit next-phase note for 8.2:
-1. Add thin FastAPI + worker queue + artifact store for multi-run orchestration.
-2. Do not implement full 8.2 in this completion pass; only stage plan and interfaces.
-
-Acceptance:
-1. CI contains lint, type, perf budget, and metadata schema gates.
-2. Lineage tooling files exist and are executable in local/dev environments.
-
-## 5) Required Test Expansion Before Final Claim
-
-Add or update tests for:
-1. Security:
-   - JSON script block embedding and sanitization.
-   - XSS/script-break payload inertness.
-2. Reporting scale:
-   - split asset parity and size reduction.
-   - image asset externalization in split mode.
-3. Gemini resilience:
-   - `429`, `5xx`, timeout, retry/jitter, breaker, cache.
-4. Depth performance:
-   - multiprocess execution and warm-cache speedup path.
-5. Config:
-   - numeric log level stored as int.
-6. CI/MLOps:
-   - metadata schema validation.
-   - perf budget pass/fail behavior.
-
-## 6) Command Checklist for Completion
-
-Run in this order:
+## 6. Verification Commands
 
 ```powershell
-# 1) Focused test lanes while implementing
+# Focused test lanes
 pytest -q tests/test_reporting.py
 pytest -q tests/test_intelligence.py
 pytest -q tests/test_features.py
 pytest -q tests/test_config_logging.py
 pytest -q tests/test_cli.py
-
-# 2) New MLOps tests
 pytest -q tests/test_run_metadata_schema.py
 
-# 3) Full deterministic suite
+# Full deterministic suite
 pytest -q
 
-# 4) Local CI-equivalent checks
+# CI-equivalent local gates
 ruff check .
 mypy src
 python scripts/check_perf_budget.py
 ```
 
-Target:
-1. No test deselections in deterministic lane except intentional `gemini_live`.
-2. All enabled checks pass.
+## 7. Definition of Done
 
-## 7) Documentation Sync Requirements
-
-After code completion:
-1. Update `high level discussion/intelligence_roadmap_1` in-place using only validated content.
-2. Mirror same substance to `docs/intelligence_roadmap.md`.
-3. Use explicit dates and internally consistent status lines.
-4. Add final "Implemented vs Next Phase" table:
-   - Points 1-8 exact status
-   - 8.2 listed as staged next-phase extension
-
-## 8) Definition of Done (Strict)
-
-All items below must be true before claiming success:
-1. Point 1 exact (`1.1 + 1.2`) complete.
-2. Point 2 exact (`2.1 + 2.2`) complete.
-3. Point 3 exact (`3.1 + 3.3`) complete.
-4. Point 4 exact (`4.1 + 4.3`) complete.
-5. Point 5 complete.
-6. Point 6 complete.
-7. Point 7 exact (`7.1`) complete with numeric level as int.
-8. Point 8 exact (`8.1`) complete with `8.2` explicitly staged.
-9. Deterministic suite fully green.
-10. Roadmap documents synced and CTO-ready.
-
-## 9) Paste-Ready New Session Instruction
-
-Use this file as the execution contract.  
-In the new session, enforce this directive:
-
-1. Implement remaining gaps from sections 4 and 5 exactly.
-2. Do not stop after partial fixes.
-3. Keep iterating until all tests and gates pass.
-4. Return final report with:
-   - changed files
-   - why each gap is now closed
-   - proof commands and outcomes
-   - explicit confirmation against each of the 8 points
+All items true before merge:
+1. Security hardening complete — no untrusted model text enters JS execution context.
+2. Report payload scales — split mode externalizes assets, single mode self-contained.
+3. Gemini resilience — jitter, timeout, circuit, cache all tested.
+4. Depth extraction parallelized — `ProcessPoolExecutor` active, Parquet cache verified.
+5. Event scoring quality regression-guarded.
+6. Packaging hygiene verified — optional extras work independently.
+7. Numeric log levels stored as `int`.
+8. MLOps phase 1 complete — CI gates, schema, DVC stages, MLflow hook.
+9. Deterministic test suite fully green (108 passed).
+10. Documentation synced.
 

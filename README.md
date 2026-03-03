@@ -430,8 +430,8 @@ Image runs as non-root (`agri` user) on `python:3.13-slim`. Default entrypoint e
 | 8.1 MLOps governance | Complete | CI gates, run metadata schema, perf budget, DVC stages, MLflow hook |
 | **8.2 Service orchestration** | **Next** | FastAPI submission layer, async worker queue, artifact store |
 
-Full technical narrative: [docs/intelligence_roadmap.md](docs/intelligence_roadmap.md)
-Execution contract: [docs/cto_upgrade_completion_handoff.md](docs/cto_upgrade_completion_handoff.md)
+Technical roadmap: [docs/intelligence_roadmap.md](docs/intelligence_roadmap.md)
+Design & implementation record: [docs/cto_upgrade_completion_handoff.md](docs/cto_upgrade_completion_handoff.md)
 
 ---
 
