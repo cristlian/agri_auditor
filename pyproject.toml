@@ -1,7 +1,7 @@
 [project]
 name = "agri-auditor"
 version = "0.1.0"
-description = "Step 1 ingestion scaffold for autonomous incident auditing."
+description = "Post-mission safety auditing for autonomous tractor operations."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

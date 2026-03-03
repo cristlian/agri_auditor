@@ -16,3 +16,8 @@ write_probe.txt
 .env
 node_modules/
 workspace/
+provided_data/
+*.egg-info/
+.vscode/
+# Ignore Copilot/AI assistant assets (skills, instructions) — local dev only
+.github/copilot_assets/

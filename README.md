@@ -32,7 +32,7 @@ The pipeline is fully deterministic offline, schema-validated, CI-gated, and con
 
 ## System Architecture
 
-![System Architecture (High-Level)](Gemini_Generated_Image_bpk2jubpk2jubpk2.png)
+![System Architecture (High-Level)](docs/assets/architecture.png)
 
 *High-level architecture overview; the text flowchart below provides the detailed flow.*
 
